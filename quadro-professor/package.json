@@ -1,0 +1,95 @@
+{
+  "name": "quadro-professor",
+  "displayName": "Quadro Digital — Professor",
+  "description": "Transmita seu código ao vivo para os alunos no VSCode deles",
+  "version": "2.0.1",
+  "publisher": "leandro-abilio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "educação",
+    "aula",
+    "transmissão",
+    "código",
+    "professor"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leandro-abilio/quadro-digital"
+  },
+  "activationEvents": [],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "quadro-professor-container",
+          "title": "Quadro Digital",
+          "icon": "$(broadcast)"
+        }
+      ]
+    },
+    "views": {
+      "quadro-professor-container": [
+        {
+          "type": "webview",
+          "id": "quadroProfessor.painel",
+          "name": "Professor"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "quadroProfessor.iniciar",
+        "title": "Iniciar transmissão",
+        "icon": "$(broadcast)"
+      },
+      {
+        "command": "quadroProfessor.encerrar",
+        "title": "Encerrar transmissão",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "quadroProfessor.trecho",
+        "title": "Transmitir trecho selecionado",
+        "icon": "$(diff-added)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "quadroProfessor.iniciar",
+          "when": "view == quadroProfessor.painel && !quadroProfessor.ativo",
+          "group": "navigation"
+        },
+        {
+          "command": "quadroProfessor.encerrar",
+          "when": "view == quadroProfessor.painel && quadroProfessor.ativo",
+          "group": "navigation"
+        },
+        {
+          "command": "quadroProfessor.trecho",
+          "when": "view == quadroProfessor.painel && quadroProfessor.ativo",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "quadroProfessor.trecho",
+        "key": "ctrl+shift+q",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

@@ -1,0 +1,32 @@
+name: Publicar no Marketplace
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Publicar quadro-professor
+        run: |
+          cd quadro-professor
+          npm install
+          vsce publish -p ${{ secrets.VSCE_TOKEN }}
+
+      - name: Publicar quadro-aluno
+        run: |
+          cd quadro-aluno
+          npm install
+          vsce publish -p ${{ secrets.VSCE_TOKEN }}

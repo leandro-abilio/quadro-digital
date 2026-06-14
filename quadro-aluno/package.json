@@ -1,0 +1,82 @@
+{
+  "name": "quadro-aluno",
+  "displayName": "Quadro Digital — Aluno",
+  "description": "Veja o código do professor em tempo real no seu VSCode",
+  "version": "2.0.1",
+  "publisher": "leandro-abilio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "educação",
+    "aula",
+    "transmissão",
+    "código",
+    "aluno"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leandro-abilio/quadro-digital"
+  },
+  "activationEvents": [],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "quadro-aluno-container",
+          "title": "Quadro Digital",
+          "icon": "$(eye)"
+        }
+      ]
+    },
+    "views": {
+      "quadro-aluno-container": [
+        {
+          "type": "webview",
+          "id": "quadroAluno.painel",
+          "name": "Quadro do Professor"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "quadroAluno.conectar",
+        "title": "Conectar ao professor",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "quadroAluno.desconectar",
+        "title": "Desconectar",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "quadroAluno.conectarDireto",
+        "title": "Quadro Aluno: Conectar (automático)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "quadroAluno.conectar",
+          "when": "view == quadroAluno.painel && !quadroAluno.conectado",
+          "group": "navigation"
+        },
+        {
+          "command": "quadroAluno.desconectar",
+          "when": "view == quadroAluno.painel && quadroAluno.conectado",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}
