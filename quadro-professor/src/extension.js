@@ -1,7 +1,59 @@
 const vscode = require('vscode');
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
+const { execFile, spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+// ── ngrok ──
+let urlNgrok = null;
+
+// Lê a URL do túnel via API local do ngrok (http://127.0.0.1:4040/api/tunnels)
+// O professor deve rodar "ngrok http 3456" manualmente antes de iniciar
+function lerUrlNgrok() {
+  return new Promise((resolve, reject) => {
+    const req = http.get('http://127.0.0.1:4040/api/tunnels', { timeout: 3000 }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const tunnels = json.tunnels || [];
+          // Procura o túnel HTTPS que aponta para a porta 3456
+          const tunnel = tunnels.find(t =>
+            t.proto === 'https' &&
+            (t.config?.addr?.includes('3456') || t.public_url?.startsWith('https'))
+          ) || tunnels.find(t => t.proto === 'https');
+
+          if (tunnel) {
+            resolve(tunnel.public_url);
+          } else {
+            reject(new Error('Nenhum túnel HTTPS encontrado'));
+          }
+        } catch (e) {
+          reject(new Error('Erro ao ler API do ngrok: ' + e.message));
+        }
+      });
+    });
+    req.on('error', () => reject(new Error('ngrok não está rodando. Execute: ngrok http 3456')));
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout ao conectar no ngrok')); });
+  });
+}
+
+async function iniciarNgrok(context, porta) {
+  try {
+    urlNgrok = await lerUrlNgrok();
+    return urlNgrok;
+  } catch (err) {
+    throw new Error(err.message);
+  }
+}
+
+function pararNgrok() {
+  urlNgrok = null;
+}
 
 // ── Estado global ──
 let servidor = null;
@@ -62,6 +114,9 @@ function iniciarServidor(porta, senha) {
       const url = new URL(req.url, 'http://localhost');
       const senhaReq = url.searchParams.get('senha');
 
+      // Headers necessários para ngrok e CORS
+      res.setHeader('ngrok-skip-browser-warning', '1');
+
       if (url.pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, versao: '2.0.0' }));
@@ -82,6 +137,12 @@ function iniciarServidor(porta, senha) {
         res.end(JSON.stringify(
           estado || { conteudo: '', linguagem: 'plaintext', nomeArquivo: 'Aguardando...', timestamp: 0 }
         ));
+
+      } else if (url.pathname === '/' || url.pathname === '/index.html') {
+        // Página web para alunos acessarem pelo navegador
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(gerarPaginaWeb(senha));
+
       } else {
         res.writeHead(404); res.end();
       }
@@ -183,31 +244,29 @@ async function cmdIniciar(context) {
     return;
   }
 
+  // ── Escolhe o modo de conexão ──
+  const modo = await vscode.window.showQuickPick([
+    {
+      label: '$(broadcast) Rede local',
+      description: 'Professor e alunos na mesma rede Wi-Fi/Ethernet',
+      detail: 'Mais rápido — requer que a rede permita comunicação entre máquinas',
+      value: 'local',
+    },
+    {
+      label: '$(globe) ngrok (túnel)',
+      description: 'Funciona mesmo com Fortinet ou redes restritivas',
+      detail: 'Requer ngrok rodando: abra o terminal e execute "ngrok http 3456" antes de continuar',
+      value: 'ngrok',
+    },
+  ], { placeHolder: 'Como os alunos vão se conectar?', ignoreFocusOut: true });
+  if (!modo) return;
+
   const senha = await vscode.window.showInputBox({
     prompt: 'Senha para a sessão',
     value: gerarSenha(),
     ignoreFocusOut: true,
   });
   if (!senha) return;
-
-  const ips = listarIPs();
-  let ip;
-  if (ips.length === 0) {
-    ip = 'localhost';
-  } else if (ips.length === 1) {
-    ip = ips[0].ip;
-  } else {
-    const escolha = await vscode.window.showQuickPick(
-      ips.map(i => ({
-        label: i.ip,
-        description: i.nome,
-        detail: i.preferido ? '⭐ Recomendado (rede física)' : '',
-      })),
-      { placeHolder: 'Escolha o IP que os alunos vão usar para conectar', ignoreFocusOut: true }
-    );
-    if (!escolha) return;
-    ip = escolha.label;
-  }
 
   const porta = 3456;
   servidor = await iniciarServidor(porta, senha);
@@ -216,9 +275,56 @@ async function cmdIniciar(context) {
     return;
   }
 
+  let enderecoConexao, linkExibido;
+
+  if (modo.value === 'ngrok') {
+    // ── Modo ngrok ──
+    painelView?.webview.postMessage({ tipo: 'carregando', msg: 'Lendo URL do ngrok...' });
+    try {
+      const url = await iniciarNgrok(context, porta);
+      // Remove https:// para o aluno digitar só o host
+      const host = url.replace('https://', '');
+      enderecoConexao = { ip: host, porta: 443, ngrok: true, url };
+      linkExibido = `URL: ${url}  Senha: ${senha}`;
+    } catch (err) {
+      pararServidor();
+      vscode.window.showErrorMessage('Falha ao iniciar ngrok: ' + err.message);
+      painelView?.webview.postMessage({ tipo: 'carregando-fim' });
+      return;
+    }
+    painelView?.webview.postMessage({ tipo: 'carregando-fim' });
+  } else {
+    // ── Modo rede local ──
+    const ips = listarIPs();
+    let ip;
+    if (ips.length === 0) {
+      ip = 'localhost';
+    } else if (ips.length === 1) {
+      ip = ips[0].ip;
+    } else {
+      const escolha = await vscode.window.showQuickPick(
+        ips.map(i => ({
+          label: i.ip,
+          description: i.nome,
+          detail: i.preferido ? '⭐ Recomendado (rede física)' : '',
+        })),
+        { placeHolder: 'Escolha o IP que os alunos vão usar para conectar', ignoreFocusOut: true }
+      );
+      if (!escolha) { pararServidor(); return; }
+      ip = escolha.label;
+    }
+    enderecoConexao = { ip, porta, ngrok: false };
+    linkExibido = `IP: ${ip}  Porta: ${porta}  Senha: ${senha}`;
+  }
+
   painelView?.webview.postMessage({
-    tipo: 'sessao', ip, porta, senha,
-    link: `IP: ${ip}  Porta: ${porta}  Senha: ${senha}`,
+    tipo: 'sessao',
+    ip: enderecoConexao.ip,
+    porta: enderecoConexao.porta,
+    ngrok: enderecoConexao.ngrok,
+    url: enderecoConexao.url,
+    senha,
+    link: linkExibido,
   });
 
   vscode.commands.executeCommand('setContext', 'quadroProfessor.ativo', true);
@@ -261,6 +367,7 @@ async function cmdIniciar(context) {
 
 async function cmdEncerrar() {
   await pararServidor();
+  pararNgrok();
   modoApagao = false;
   modoFreeze = false;
   mostrarNumeros = true;
@@ -287,6 +394,354 @@ function transmitirTrecho() {
   estadoAtual = novoEstado;
   if (modoFreeze) estadoFreezeAtual = { ...novoEstado };
   painelView?.webview.postMessage({ tipo: 'atualizacao', ...novoEstado });
+}
+
+// ── Página web para alunos acessarem pelo navegador ──
+function gerarPaginaWeb(senha) {
+  const tokens = getTokens();
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📺 Quadro Digital</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --borda: #30363d;
+    --texto: #e6edf3; --muted: #8b949e;
+    --azul: #58a6ff; --verde: #2ea043; --laranja: #e8a838;
+  }
+
+  body {
+    background:var(--bg); color:var(--texto);
+    font-family:'Segoe UI',system-ui,sans-serif;
+    height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    background:var(--bg2); border-bottom:1px solid var(--borda);
+    padding:8px 16px; display:flex; align-items:center; gap:10px; flex-shrink:0;
+  }
+  .header-titulo { font-size:13px; font-weight:600; flex:1; }
+  .badge-status {
+    display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted);
+    padding:3px 10px; border:1px solid var(--borda); border-radius:12px;
+  }
+  .dot { width:7px; height:7px; border-radius:50%; background:#f44; transition:background 0.3s; }
+  .dot.ativo { background:var(--verde); animation:pulsar 2s infinite; }
+  .dot.reconectando { background:var(--laranja); animation:piscar 1s infinite; }
+  @keyframes pulsar { 0%,100%{opacity:1} 50%{opacity:.4} }
+  @keyframes piscar { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .badge-lang {
+    font-size:11px; padding:2px 8px; border-radius:10px;
+    background:#21262d; color:var(--azul);
+  }
+
+  /* ── Toolbar do aluno ── */
+  .toolbar {
+    background:var(--bg2); border-bottom:1px solid var(--borda);
+    padding:4px 12px; display:flex; align-items:center; gap:6px; flex-shrink:0;
+  }
+  .btn {
+    background:transparent; border:1px solid transparent; color:var(--muted);
+    border-radius:4px; padding:3px 8px; font-size:12px; cursor:pointer;
+    transition:background 0.15s;
+  }
+  .btn:hover { background:#21262d; border-color:var(--borda); color:var(--texto); }
+  #label-fonte { font-size:11px; color:var(--muted); min-width:30px; text-align:center; }
+
+  /* ── Info linha ── */
+  .info-linha {
+    background:#1e3a5f; border-bottom:1px solid var(--borda);
+    padding:3px 16px; font-size:11px; color:#9cdcfe;
+    display:none; align-items:center; gap:8px; flex-shrink:0;
+  }
+  .info-linha.visivel { display:flex; }
+
+  /* ── Código ── */
+  main { flex:1; overflow:auto; padding:12px 0; position:relative; }
+
+  .linha-wrapper { display:flex; min-height:1.6em; }
+  .linha-wrapper:hover { background:rgba(255,255,255,0.03); }
+  .linha-wrapper.destacada {
+    background:rgba(88,166,255,0.1) !important;
+    border-left:3px solid var(--azul);
+  }
+  .num-linha {
+    min-width:48px; text-align:right; padding:0 14px 0 8px;
+    color:#484f58; font-family:'Cascadia Code','Consolas',monospace;
+    user-select:none; flex-shrink:0; font-size:13px; line-height:1.6em;
+  }
+  .num-linha.oculto { display:none; }
+  .conteudo-linha {
+    flex:1; padding:0 16px 0 4px;
+    font-family:'Cascadia Code','Consolas','Courier New',monospace;
+    font-size:13px; line-height:1.6em; white-space:pre; overflow:visible;
+  }
+  .kw{color:#79c0ff} .blt{color:#56d364} .str{color:#a5d6ff}
+  .cmt{color:#8b949e;font-style:italic} .num{color:#f2cc60} .dec{color:#d2a8ff}
+
+  /* ── Overlay apagão ── */
+  #overlay-apagao {
+    display:none; position:absolute; inset:0;
+    background:var(--bg); align-items:center; justify-content:center;
+    flex-direction:column; gap:12px; z-index:5;
+  }
+  #overlay-apagao.ativo { display:flex; }
+  #overlay-apagao p { font-size:14px; color:var(--muted); }
+
+  /* ── Toast ── */
+  #toast {
+    position:fixed; bottom:20px; right:16px;
+    background:#21262d; color:var(--texto);
+    border:1px solid var(--borda); padding:6px 14px;
+    border-radius:6px; font-size:12px;
+    opacity:0; transition:opacity 0.2s, transform 0.2s; transform:translateY(6px);
+    pointer-events:none;
+  }
+  #toast.visivel { opacity:1; transform:translateY(0); }
+
+  /* ── Footer ── */
+  footer {
+    background:var(--bg2); border-top:1px solid var(--borda);
+    padding:3px 16px; font-size:11px; color:var(--muted);
+    display:flex; justify-content:space-between; flex-shrink:0;
+  }
+
+  /* ── Tela de senha ── */
+  #tela-senha {
+    flex:1; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:16px; padding:32px;
+    text-align:center;
+  }
+  #tela-senha .emoji { font-size:48px; }
+  #tela-senha p { font-size:13px; color:var(--muted); }
+  .input-senha {
+    background:#21262d; color:var(--texto);
+    border:1px solid var(--borda); border-radius:6px;
+    padding:8px 14px; font-size:14px; width:220px; text-align:center;
+    outline:none;
+  }
+  .input-senha:focus { border-color:var(--azul); }
+  .btn-entrar {
+    background:var(--verde); color:#fff; border:none;
+    border-radius:6px; padding:8px 24px; font-size:14px;
+    cursor:pointer; font-weight:600; transition:opacity 0.15s;
+  }
+  .btn-entrar:hover { opacity:0.85; }
+  .erro-senha { font-size:12px; color:#f85149; display:none; }
+</style>
+</head>
+<body>
+
+<!-- Tela de senha -->
+<div id="tela-senha">
+  <div class="emoji">📺</div>
+  <p>Digite a senha da sessão para ver o código do professor</p>
+  <input class="input-senha" id="input-senha" type="text"
+    placeholder="ex: gato-casa-azul"
+    onkeydown="if(event.key==='Enter') entrar()">
+  <button class="btn-entrar" onclick="entrar()">Entrar</button>
+  <span class="erro-senha" id="erro-senha">Senha incorreta. Tente novamente.</span>
+</div>
+
+<!-- Interface principal (oculta até autenticar) -->
+<div id="interface" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+  <header>
+    <span>📺</span>
+    <span class="header-titulo" id="nome-arquivo">Conectando...</span>
+    <span class="badge-lang" id="badge-lang">—</span>
+    <div class="badge-status">
+      <span class="dot" id="dot-status"></span>
+      <span id="txt-status">Conectando</span>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <span style="font-size:11px;color:var(--muted)">Fonte:</span>
+    <button class="btn" onclick="alterarFonte(-1)">A−</button>
+    <span id="label-fonte">13px</span>
+    <button class="btn" onclick="alterarFonte(1)">A+</button>
+    <span style="margin-left:auto;font-size:11px;color:var(--muted)" id="txt-atualizacoes">—</span>
+  </div>
+
+  <div class="info-linha" id="info-linha">
+    <span>📍 Professor está em:</span>
+    <strong id="texto-linha-dest">—</strong>
+  </div>
+
+  <main>
+    <div id="linhas"></div>
+    <div id="overlay-apagao">
+      <div style="font-size:48px">🙈</div>
+      <p>Código oculto pelo professor</p>
+    </div>
+  </main>
+
+  <footer>
+    <span>Ctrl+A seleciona tudo • Ctrl+C copia</span>
+    <span id="rodape-info">Quadro Digital</span>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// Tokens de highlight injetados pelo servidor
+const TOKENS = ${JSON.stringify(tokens)};
+const SENHA_CORRETA = '${senha}';
+
+let senhaAtual = '';
+let pollingTimer = null;
+let ultimoTimestamp = 0;
+let linhasEls = [];
+let fontAtual = 13;
+let numerosVisiveis = true;
+let totalAtualizacoes = 0;
+
+// ── Autenticação ──
+function entrar() {
+  const digitada = document.getElementById('input-senha').value.trim();
+  if (digitada !== SENHA_CORRETA) {
+    document.getElementById('erro-senha').style.display = 'block';
+    return;
+  }
+  senhaAtual = digitada;
+  document.getElementById('tela-senha').style.display = 'none';
+  document.getElementById('interface').style.display = 'flex';
+  iniciarPolling();
+}
+
+// ── Polling ──
+function iniciarPolling() {
+  buscarEstado();
+  pollingTimer = setInterval(buscarEstado, 1500);
+}
+
+async function buscarEstado() {
+  try {
+    const res = await fetch('/estado?senha=' + encodeURIComponent(senhaAtual), {
+      headers: { 'ngrok-skip-browser-warning': '1' },
+      cache: 'no-store',
+    });
+
+    if (res.status === 401) {
+      clearInterval(pollingTimer);
+      document.getElementById('txt-status').textContent = 'Senha inválida';
+      return;
+    }
+
+    const dados = await res.json();
+
+    document.getElementById('dot-status').className = 'dot ativo';
+    document.getElementById('txt-status').textContent = 'Ao vivo';
+
+    if (dados.timestamp !== ultimoTimestamp) {
+      ultimoTimestamp = dados.timestamp;
+      aplicarAtualizacao(dados);
+    }
+  } catch {
+    document.getElementById('dot-status').className = 'dot reconectando';
+    document.getElementById('txt-status').textContent = 'Reconectando...';
+  }
+}
+
+// ── Highlight ──
+function highlight(codigo, lang) {
+  const regras = TOKENS[lang] || TOKENS.javascript;
+  const CLASSES = { keyword:'kw', builtin:'blt', string:'str', comment:'cmt', number:'num', decorator:'dec' };
+  const ordem = ['string','comment','decorator','keyword','builtin','number'];
+  const regioes = [];
+  ordem.forEach(tipo => {
+    if (!regras[tipo]) return;
+    const re = new RegExp(regras[tipo], 'g'); let m;
+    while ((m = re.exec(codigo)) !== null) {
+      const s = m.index, e = m.index + m[0].length;
+      if (!regioes.some(r => s < r.e && e > r.s)) regioes.push({ s, e, cls: CLASSES[tipo], text: m[0] });
+    }
+  });
+  regioes.sort((a,b) => a.s - b.s);
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let res = '', pos = 0;
+  regioes.forEach(r => { res += esc(codigo.slice(pos, r.s)); res += '<span class="' + r.cls + '">' + esc(r.text) + '</span>'; pos = r.e; });
+  return res + esc(codigo.slice(pos));
+}
+
+// ── Renderiza código ──
+function aplicarAtualizacao(dados) {
+  document.getElementById('nome-arquivo').textContent = dados.nomeArquivo || '—';
+  document.getElementById('badge-lang').textContent = dados.linguagem || '—';
+  document.getElementById('overlay-apagao').classList.toggle('ativo', !!dados.apagao);
+
+  const linhas = (dados.conteudo || '').split('\\n');
+  const codigoHL = highlight(dados.conteudo || '', dados.linguagem || 'plaintext');
+  const linhasHL = codigoHL.split('\\n');
+  const container = document.getElementById('linhas');
+  container.innerHTML = ''; linhasEls = [];
+
+  linhas.forEach((_, i) => {
+    const w = document.createElement('div'); w.className = 'linha-wrapper';
+    const n = document.createElement('span');
+    n.className = 'num-linha' + (numerosVisiveis ? '' : ' oculto');
+    n.style.fontSize = fontAtual + 'px';
+    n.style.lineHeight = (fontAtual * 1.6) + 'px';
+    n.textContent = i + 1;
+    const c = document.createElement('span'); c.className = 'conteudo-linha';
+    c.style.fontSize = fontAtual + 'px';
+    c.style.lineHeight = (fontAtual * 1.6) + 'px';
+    c.innerHTML = linhasHL[i] ?? '';
+    w.appendChild(n); w.appendChild(c); container.appendChild(w); linhasEls.push(w);
+  });
+
+  totalAtualizacoes++;
+  document.getElementById('txt-atualizacoes').textContent = totalAtualizacoes + ' atualização(ões)';
+  document.getElementById('rodape-info').textContent = dados.nomeArquivo || '';
+
+  if (dados.linhaDestacada !== null && dados.linhaDestacada !== undefined)
+    destacarLinha(dados.linhaDestacada);
+}
+
+// ── Destaca linha ──
+function destacarLinha(linha) {
+  linhasEls.forEach(el => el.classList.remove('destacada'));
+  const el = linhasEls[linha];
+  if (!el) return;
+  el.classList.add('destacada');
+  const texto = el.querySelector('.conteudo-linha').textContent.trim();
+  const infoEl = document.getElementById('info-linha');
+  if (texto) {
+    infoEl.classList.add('visivel');
+    document.getElementById('texto-linha-dest').textContent =
+      'L' + (linha+1) + '  ' + texto.slice(0, 60) + (texto.length > 60 ? '…' : '');
+  } else { infoEl.classList.remove('visivel'); }
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// ── Fonte local ──
+function alterarFonte(delta) {
+  fontAtual = Math.max(10, Math.min(32, fontAtual + delta));
+  document.getElementById('label-fonte').textContent = fontAtual + 'px';
+  document.querySelectorAll('.conteudo-linha, .num-linha').forEach(el => {
+    el.style.fontSize = fontAtual + 'px';
+    el.style.lineHeight = (fontAtual * 1.6) + 'px';
+  });
+}
+
+// ── Toast ao copiar ──
+document.addEventListener('copy', () => {
+  const t = document.getElementById('toast');
+  t.textContent = '✓ Copiado!'; t.classList.add('visivel');
+  setTimeout(() => t.classList.remove('visivel'), 1600);
+});
+
+// Foca no campo de senha ao carregar
+document.getElementById('input-senha').focus();
+</script>
+</body>
+</html>`;
 }
 
 function activate(context) {
@@ -487,6 +942,13 @@ body {
   <button class="btn-primario" onclick="enviar('iniciar')">▶ Iniciar transmissão</button>
 </div>
 
+<!-- Tela carregando (ngrok) -->
+<div id="tela-carregando" style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center">
+  <div style="width:28px;height:28px;border:2px solid var(--vscode-panel-border);border-top-color:var(--vscode-focusBorder);border-radius:50%;animation:spin 0.8s linear infinite"></div>
+  <p id="txt-carregando" style="font-size:12px;color:var(--vscode-descriptionForeground)">Iniciando...</p>
+</div>
+@keyframes spin { to { transform:rotate(360deg); } }
+
 <!-- Tela sessão -->
 <div id="tela-sessao">
 
@@ -503,8 +965,9 @@ body {
       <span class="info-valor" id="val-senha">—</span>
     </div>
     <div class="info-row">
-      <span class="info-label">IP</span>
+      <span class="info-label">Endereço</span>
       <span class="info-valor" id="val-ip">—</span>
+      <span id="badge-ngrok" style="display:none;font-size:10px;padding:2px 6px;border-radius:3px;background:#1a6334;color:#3fb68b;white-space:nowrap">🌐 ngrok</span>
     </div>
     <button class="btn" style="width:100%;justify-content:center" onclick="copiarLink()">
       📋 Copiar dados para o chat
@@ -647,12 +1110,30 @@ function copiarLink() {
 window.addEventListener('message', (e) => {
   const msg = e.data;
   switch(msg.tipo) {
+    case 'carregando':
+      document.getElementById('tela-inicial').style.display = 'none';
+      document.getElementById('tela-carregando').style.display = 'flex';
+      document.getElementById('txt-carregando').textContent = msg.msg;
+      break;
+    case 'carregando-fim':
+      document.getElementById('tela-carregando').style.display = 'none';
+      document.getElementById('tela-inicial').style.display = 'flex';
+      break;
     case 'sessao':
       dadosSessao = msg;
       document.getElementById('tela-inicial').style.display = 'none';
+      document.getElementById('tela-carregando').style.display = 'none';
       document.getElementById('tela-sessao').style.display = 'flex';
       document.getElementById('val-senha').textContent = msg.senha;
-      document.getElementById('val-ip').textContent = msg.ip + ':' + msg.porta;
+      // Exibe URL ngrok ou IP:porta
+      const endLabel = msg.ngrok
+        ? msg.url
+        : msg.ip + ':' + msg.porta;
+      document.getElementById('val-ip').textContent = endLabel;
+      // Badge ngrok
+      const badge = document.getElementById('badge-ngrok');
+      if (msg.ngrok) { badge.style.display = ''; }
+      else { badge.style.display = 'none'; }
       break;
     case 'encerrado':
       document.getElementById('tela-sessao').style.display = 'none';

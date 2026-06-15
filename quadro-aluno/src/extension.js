@@ -5,6 +5,7 @@ let pollingTimer = null;
 let ultimoTimestamp = 0;
 let conectado = false;
 let ipAtual = '', senhaAtual = '';
+let modoNgrok = false; // true quando conectado via ngrok (HTTPS)
 const porta = 3456;
 let alunoView = null;
 let tentativasReconexao = 0;
@@ -12,7 +13,23 @@ const MAX_TENTATIVAS = 999; // reconecta indefinidamente
 
 function httpGet(path) {
   return new Promise((resolve, reject) => {
-    const req = http.get(`http://${ipAtual}:${porta}${path}`, { timeout: 3000 }, (res) => {
+    // Suporta tanto HTTP (rede local) quanto HTTPS (ngrok)
+    const usarHttps = modoNgrok;
+    const modulo = usarHttps ? require('https') : require('http');
+    const urlBase = usarHttps
+      ? `https://${ipAtual}${path}`
+      : `http://${ipAtual}:${porta}${path}`;
+
+    const opcoes = {
+      timeout: 5000,
+      headers: {
+        'ngrok-skip-browser-warning': '1',
+        'User-Agent': 'QuadroDigital/2.0',
+      },
+      // Aceita certificados autoassinados/ngrok em redes corporativas
+      rejectUnauthorized: false,
+    };
+    const req = modulo.get(urlBase, opcoes, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -108,12 +125,30 @@ class AlunoViewProvider {
 }
 
 async function cmdConectar() {
-  const ip = await vscode.window.showInputBox({
-    prompt: 'IP do professor',
-    placeHolder: 'ex: 192.168.1.42',
+  // Pergunta o modo de conexão
+  const modo = await vscode.window.showQuickPick([
+    {
+      label: '$(broadcast) Rede local',
+      description: 'Digite o IP do professor',
+      value: 'local',
+    },
+    {
+      label: '$(globe) ngrok',
+      description: 'Cole a URL ngrok do professor (ex: abc123.ngrok.io)',
+      value: 'ngrok',
+    },
+  ], { placeHolder: 'Como o professor está transmitindo?', ignoreFocusOut: true });
+  if (!modo) return;
+
+  const prompt = modo.value === 'ngrok'
+    ? 'URL ngrok do professor (ex: abc123.ngrok.io)'
+    : 'IP do professor (ex: 192.168.1.42)';
+
+  const endereco = await vscode.window.showInputBox({
+    prompt,
     ignoreFocusOut: true,
   });
-  if (!ip) return;
+  if (!endereco) return;
 
   const senha = await vscode.window.showInputBox({
     prompt: 'Senha da sessão',
@@ -121,7 +156,9 @@ async function cmdConectar() {
   });
   if (!senha) return;
 
-  ipAtual = ip.trim();
+  modoNgrok = modo.value === 'ngrok';
+  // Remove https:// se o aluno colou a URL completa
+  ipAtual = endereco.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   senhaAtual = senha.trim();
   ultimoTimestamp = 0;
   conectado = false;
@@ -132,7 +169,7 @@ async function cmdConectar() {
   if (!ok) {
     alunoView?.webview.postMessage({
       tipo: 'erro',
-      msg: `Não foi possível conectar em ${ipAtual}:${porta}.\nVerifique o IP e se o professor iniciou a sessão.`,
+      msg: 'Não foi possível conectar em ' + ipAtual + '.\nVerifique o endereço e se o professor iniciou a sessão.',
     });
     return;
   }
@@ -150,13 +187,15 @@ function cmdDesconectar() {
 
 // ── Conexão silenciosa para automação via Veyon ──
 // Uso no Veyon: code --command quadroAluno.conectarDireto --args "[\"IP\",\"SENHA\"]"
-async function cmdConectarDireto(ip, senha) {
+// Aceita terceiro argumento opcional: 'ngrok' para modo tunnel
+async function cmdConectarDireto(ip, senha, modo) {
   if (!ip || !senha) {
     vscode.window.showErrorMessage('Quadro Aluno: IP e senha são obrigatórios para conexão direta.');
     return;
   }
 
-  ipAtual = String(ip).trim();
+  modoNgrok = String(modo || '').toLowerCase() === 'ngrok';
+  ipAtual = String(ip).trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   senhaAtual = String(senha).trim();
   ultimoTimestamp = 0;
   conectado = false;

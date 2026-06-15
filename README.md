@@ -4,22 +4,32 @@ Extensões VSCode para transmitir código ao vivo em sala de aula.
 
 ## Extensões
 
-| Extensão | Para quem | Marketplace |
-|---|---|---|
-| **quadro-professor** | Professor | [Quadro Digital — Professor](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-professor) |
-| **quadro-aluno** | Alunos | [Quadro Digital — Aluno](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-aluno) |
+| Extensão | Para quem | Versão | Marketplace |
+|---|---|---|---|
+| **quadro-professor** | Professor | 2.2.0 | [Quadro Digital — Professor](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-professor) |
+| **quadro-aluno** | Alunos | 2.1.2 | [Quadro Digital — Aluno](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-aluno) |
 
 ## Como funciona
 
 ```
-Professor digita código  →  salva ou digita (500ms debounce)
-       ↓
-Servidor HTTP na porta 3456
-       ↓
-Alunos fazem polling a cada 1.5s via extensão
-       ↓
-Código aparece em tempo real no painel do aluno
+Professor edita código no VSCode
+         ↓
+Servidor HTTP na porta 3456 (extensão do professor)
+         ↓
+Modo rede local → Alunos conectam pela extensão Quadro Aluno
+Modo ngrok      → Alunos abrem no navegador (funciona com Fortinet)
 ```
+
+## Modos de conexão
+
+### Rede local
+Professor e alunos na mesma rede sem restrições. Alunos usam a extensão **Quadro Aluno** no VSCode.
+
+### ngrok (Fortinet / redes restritas)
+1. Professor roda `ngrok http 3456` no terminal
+2. Inicia transmissão → escolhe **ngrok**
+3. Compartilha a URL e senha no chat
+4. Alunos abrem a URL no **navegador** — sem instalar nada
 
 ## Estrutura do repositório
 
@@ -27,11 +37,11 @@ Código aparece em tempo real no painel do aluno
 quadro-digital/
 ├── quadro-professor/       ← Extensão do professor
 │   ├── src/
-│   │   └── extension.js   ← Servidor HTTP + painel lateral
+│   │   └── extension.js   ← Servidor HTTP + painel lateral + página web
 │   ├── package.json
 │   ├── icon.png
 │   └── README.md
-├── quadro-aluno/           ← Extensão do aluno
+├── quadro-aluno/           ← Extensão do aluno (rede local)
 │   ├── src/
 │   │   └── extension.js   ← Polling + painel lateral
 │   ├── package.json
@@ -48,43 +58,51 @@ quadro-digital/
 - 👁 **Apagão** — oculta o código para os alunos pensarem
 - ✂️ **Trecho** — transmite só o trecho selecionado
 - ⏱ **Temporizador** — cronômetro com alerta visual
-- 🔢 Numeração de linhas
-- Destaque automático da linha do cursor
-- Escolha de IP de rede (ignora VPN/Radmin)
+- 🌐 **Modo ngrok** — serve página web para alunos acessarem pelo navegador
+- Escolha de IP de rede (ignora VPN/Radmin/VMware)
+- Transmissão em tempo real (debounce 500ms ao digitar)
 
-### Aluno
+### Aluno (extensão VSCode)
 - 📡 Reconexão automática se a rede cair
 - A− / A+ para ajustar fonte localmente
 - Destaque da linha onde o professor está
 - Syntax highlighting para Python, JavaScript e TypeScript
-- `Ctrl+C` para copiar qualquer trecho
+
+### Aluno (navegador — modo ngrok)
+- Sem instalação — abre qualquer navegador
+- Tela de senha para autenticação
+- A− / A+ para ajustar fonte
+- Destaque de linha do professor
+- Funciona em celular, tablet ou PC
 
 ## Automação via Veyon
 
-Para conectar todos os alunos automaticamente pelo Veyon Master:
+Para conectar todos os alunos automaticamente (rede local):
 
 ```
-code --command quadroAluno.conectarDireto --args "[\"192.168.18.22\",\"sua-senha\"]"
+code --command quadroAluno.conectarDireto --args "[\"192.168.1.42\",\"sua-senha\"]"
 ```
 
-Substitua o IP e a senha pelos dados da sessão atual.
+Para modo ngrok:
+```
+code --command quadroAluno.conectarDireto --args "[\"abc123.ngrok-free.dev\",\"sua-senha\",\"ngrok\"]"
+```
 
 ## Desenvolvimento local
 
 ```bash
-# Clonar
 git clone https://github.com/leandro-abilio/quadro-digital.git
 cd quadro-digital
 
-# Testar a extensão do professor
+# Extensão do professor
 cd quadro-professor
 npm install
-# Pressione F5 no VSCode para abrir a janela de teste
+# F5 no VSCode para abrir janela de teste
 
-# Testar a extensão do aluno
+# Extensão do aluno
 cd ../quadro-aluno
 npm install
-# Pressione F5 no VSCode para abrir a janela de teste
+# F5 no VSCode para abrir janela de teste
 ```
 
 ## Publicar no Marketplace
@@ -92,20 +110,16 @@ npm install
 ```bash
 npm install -g @vscode/vsce
 
-# Professor
-cd quadro-professor
-vsce publish
-
-# Aluno
-cd ../quadro-aluno
-vsce publish
+cd quadro-professor && vsce publish
+cd ../quadro-aluno && vsce publish
 ```
 
-## Requisitos
+## Requisitos de rede
 
-- VSCode 1.85+
-- Professor e alunos na **mesma rede local**
-- Porta **3456** liberada entre as máquinas
+| Modo | Requisito |
+|---|---|
+| Rede local | Porta 3456 liberada entre professor e alunos |
+| ngrok | Professor com acesso à internet • Alunos com navegador |
 
 ## Autor
 
