@@ -55,6 +55,21 @@ function pararNgrok() {
   urlNgrok = null;
 }
 
+// ── Cloudflare Tunnel ──
+// Não usamos spawn (bloqueado pela Microsoft Store). O professor roda
+// "cloudflared tunnel --url http://localhost:3456" manualmente no terminal
+// e cola aqui a URL https://xxx.trycloudflare.com exibida no stdout.
+async function iniciarCloudflare() {
+  const url = await vscode.window.showInputBox({
+    prompt: 'Cole a URL gerada pelo cloudflared (ex: https://abc-def.trycloudflare.com)',
+    placeHolder: 'https://xxx.trycloudflare.com',
+    ignoreFocusOut: true,
+    validateInput: (v) => /^https:\/\/.+/.test(v.trim()) ? null : 'Informe uma URL https:// válida',
+  });
+  if (!url) throw new Error('Nenhuma URL informada');
+  return url.trim();
+}
+
 // ── Estado global ──
 let servidor = null;
 let ultimoEditor = null;
@@ -258,6 +273,12 @@ async function cmdIniciar(context) {
       detail: 'Requer ngrok rodando: abra o terminal e execute "ngrok http 3456" antes de continuar',
       value: 'ngrok',
     },
+    {
+      label: '$(cloud) Cloudflare Tunnel',
+      description: 'Alternativa ao ngrok — geralmente não bloqueada por firewalls corporativos',
+      detail: 'Execute "cloudflared tunnel --url http://localhost:3456" no terminal e cole a URL gerada',
+      value: 'cloudflare',
+    },
   ], { placeHolder: 'Como os alunos vão se conectar?', ignoreFocusOut: true });
   if (!modo) return;
 
@@ -284,7 +305,7 @@ async function cmdIniciar(context) {
       const url = await iniciarNgrok(context, porta);
       // Remove https:// para o aluno digitar só o host
       const host = url.replace('https://', '');
-      enderecoConexao = { ip: host, porta: 443, ngrok: true, url };
+      enderecoConexao = { ip: host, porta: 443, ngrok: true, url, servico: 'ngrok' };
       linkExibido = `URL: ${url}  Senha: ${senha}`;
     } catch (err) {
       pararServidor();
@@ -293,6 +314,21 @@ async function cmdIniciar(context) {
       return;
     }
     painelView?.webview.postMessage({ tipo: 'carregando-fim' });
+  } else if (modo.value === 'cloudflare') {
+    // ── Modo Cloudflare Tunnel ──
+    vscode.window.showInformationMessage(
+      'Abra um terminal e execute: cloudflared tunnel --url http://localhost:3456'
+    );
+    try {
+      const url = await iniciarCloudflare();
+      const host = url.replace('https://', '');
+      enderecoConexao = { ip: host, porta: 443, ngrok: true, url, servico: 'cloudflare' };
+      linkExibido = `URL: ${url}  Senha: ${senha}`;
+    } catch (err) {
+      pararServidor();
+      vscode.window.showErrorMessage('Falha ao configurar Cloudflare Tunnel: ' + err.message);
+      return;
+    }
   } else {
     // ── Modo rede local ──
     const ips = listarIPs();
@@ -323,6 +359,7 @@ async function cmdIniciar(context) {
     porta: enderecoConexao.porta,
     ngrok: enderecoConexao.ngrok,
     url: enderecoConexao.url,
+    servico: enderecoConexao.servico,
     senha,
     link: linkExibido,
   });
@@ -1130,10 +1167,14 @@ window.addEventListener('message', (e) => {
         ? msg.url
         : msg.ip + ':' + msg.porta;
       document.getElementById('val-ip').textContent = endLabel;
-      // Badge ngrok
+      // Badge do túnel (ngrok / Cloudflare)
       const badge = document.getElementById('badge-ngrok');
-      if (msg.ngrok) { badge.style.display = ''; }
-      else { badge.style.display = 'none'; }
+      if (msg.ngrok) {
+        badge.textContent = msg.servico === 'cloudflare' ? '🌐 cloudflare' : '🌐 ngrok';
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
+      }
       break;
     case 'encerrado':
       document.getElementById('tela-sessao').style.display = 'none';
