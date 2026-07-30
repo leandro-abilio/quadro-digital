@@ -86,7 +86,7 @@ code --command quadroAluno.conectarDireto --args "[\"abc.ngrok-free.dev\",\"senh
 - Ticket aberto com TI — prazo de resposta ~6 meses
 - **Cloudflare Tunnel testado — NÃO foi bloqueado pelo Fortinet** ← próximo a explorar
 
-## Próximo passo: Cloudflare Tunnel
+## Cloudflare Tunnel (implementado, parcial)
 
 O Cloudflare Tunnel (`cloudflared`) é uma alternativa ao ngrok que:
 - Não requer abertura de portas
@@ -94,10 +94,18 @@ O Cloudflare Tunnel (`cloudflared`) é uma alternativa ao ngrok que:
 - Tem plano gratuito
 - Pode ser configurado com domínio próprio
 
-A ideia é integrar o `cloudflared` na extensão do professor:
-1. Professor roda `cloudflared tunnel --url http://localhost:3456` no terminal
-2. Extensão lê a URL gerada via API ou stdout
-3. Alunos acessam pelo navegador
+Implementado em `quadro-professor/src/extension.js` (`iniciarCloudflare`):
+1. Professor roda `cloudflared tunnel --url http://localhost:3456` no terminal manualmente (sem `spawn`, mesma limitação do ngrok)
+2. Como o quick tunnel do `cloudflared` não expõe uma API local documentada (diferente do `http://127.0.0.1:4040` do ngrok), a extensão pede que o professor **cole** a URL `https://xxx.trycloudflare.com` exibida no stdout
+3. Badge no painel mostra "🌐 cloudflare" em vez de "🌐 ngrok"
+4. Ainda não testado em campo (rede da escola) — próximo passo é validar se esse fluxo passa pelo Fortinet como esperado
+
+### Outras alternativas ao bloqueio do Fortinet (avaliar se Cloudflare falhar)
+- **Tailscale / ZeroTier (rede mesh)**: cria uma rede virtual entre professor e alunos sem depender de portas locais nem do Fortinet enxergar tráfego entre máquinas — mas exige instalar um cliente em cada máquina, o que pode esbarrar em restrições de instalação de software da escola.
+- **VPS própria como relay**: extensão do professor envia o estado para um servidor externo (barato, ex.: Oracle Cloud free tier) via HTTPS de saída; alunos também buscam de lá. Só depende de HTTPS de saída ser permitido — mais controle, mas dá manutenção de infra.
+- **Serviço serverless (Cloudflare Workers/KV, Firebase, Supabase Realtime)**: parecido com a VPS, mas sem servidor para manter; grátis para esse volume de tráfego. Exigiria reescrever a camada de transporte (hoje é HTTP puro com `http`/`https` do Node).
+- **WebSocket seguro via porta 443 direto**: como o Fortinet citado bloqueia HTTPS externo do Node e do navegador, isso provavelmente cairia na mesma restrição — não é uma alternativa real aqui.
+- Nenhuma dessas é obviamente melhor que Cloudflare Tunnel; a recomendação é testar Cloudflare Tunnel primeiro (já testado como não bloqueado) e só migrar se ele parar de funcionar.
 
 ## Estrutura de arquivos
 
