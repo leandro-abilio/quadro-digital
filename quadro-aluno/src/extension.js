@@ -60,15 +60,37 @@ function testarFirebase() {
   });
 }
 
+// ETag da última leitura — usado para pedir "só me avise se mudou" (304 Not Modified)
+// em vez de baixar o estado inteiro a cada poll de 1.5s. Isso é importante porque o
+// plano gratuito do Firebase tem cota de download (Spark: ~360MB/dia) e, sem isso,
+// uma turma de 30 alunos numa aula de 50min já consumiria ~150-200MB sozinha.
+let etagFirebaseAtual = null;
+let ultimoCorpoFirebase = null;
+
 function buscarEstadoFirebase() {
   return new Promise((resolve, reject) => {
     const url = `${ipAtual}/salas/${encodeURIComponent(senhaAtual)}.json`;
-    const req = require('https').get(url, { timeout: 5000 }, (res) => {
+    const opcoes = {
+      timeout: 5000,
+      headers: { 'X-Firebase-ETag': 'true' },
+    };
+    if (etagFirebaseAtual) opcoes.headers['If-None-Match'] = etagFirebaseAtual;
+
+    const req = require('https').get(url, opcoes, (res) => {
+      if (res.statusCode === 304) {
+        res.resume(); // descarta o corpo vazio da resposta
+        resolve({ status: 304, body: ultimoCorpoFirebase });
+        return;
+      }
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-        catch (e) { reject(e); }
+        try {
+          const corpo = JSON.parse(data);
+          if (res.headers.etag) etagFirebaseAtual = res.headers.etag;
+          ultimoCorpoFirebase = corpo;
+          resolve({ status: res.statusCode, body: corpo });
+        } catch (e) { reject(e); }
       });
     });
     req.on('error', reject);
@@ -197,6 +219,8 @@ async function finalizarConexaoFirebase(url, sala) {
   senhaAtual = sala.trim();
   ultimoTimestamp = 0;
   conectado = false;
+  etagFirebaseAtual = null;
+  ultimoCorpoFirebase = null;
 
   alunoView?.webview.postMessage({ tipo: 'tentando', ip: ipAtual });
 

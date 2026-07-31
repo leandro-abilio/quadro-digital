@@ -14,8 +14,8 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ## Versões atuais
 
-- quadro-professor: **2.4.0** (bump feito, aguardando publicação — última publicada no Marketplace é 2.3.0)
-- quadro-aluno: **2.3.0** (bump feito, aguardando publicação — última publicada no Marketplace é 2.2.0)
+- quadro-professor: **2.4.0** — publicada no Marketplace
+- quadro-aluno: **2.3.1** — 2.3.0 já publicada (sem a otimização de ETag); 2.3.1 adiciona ETag/304 no polling para não estourar a cota de download do Firebase, ainda não publicada
 
 ## Arquitetura técnica
 
@@ -143,6 +143,14 @@ Diferença importante: `salas` só permite ler *uma* sala por vez (quem não sab
 - Rules atualizadas no projeto `quadro-digital-dds` e validadas via curl: registro/listagem de salas públicas, filtro de sala "encerrada" (heartbeat antigo) excluída da lista, e confirmação de que as regras antigas de `/salas` não quebraram.
 - **Testado dentro do VSCode (F5) com o fluxo completo do lobby (Salas Públicas, pública/privada) e com ngrok/Cloudflare Tunnel removidos — funcionou.**
 - Versões bumpadas (2.4.0 professor / 2.3.0 aluno) e `.vsix` empacotados. **Ainda não publicado no Marketplace** — falta rodar `vsce publish` (feito manualmente pelo Leandro, que já tem o PAT).
+
+### Cota do plano gratuito do Firebase e otimização com ETag (2026-07-31)
+O plano Spark (gratuito) do Realtime Database libera ~10GB/mês de download (~360MB/dia mostrado no console). O polling do aluno a cada 1.5s, sem otimização, baixaria o estado inteiro mesmo sem mudança nenhuma: numa turma de 30 alunos numa aula de 50min, isso dá **~180MB só nessa aula** (2000 requisições/aluno × ~3KB) — 2 turmas no mesmo dia já estourariam a cota.
+
+**Solução implementada**: `buscarEstadoFirebase()` em `quadro-aluno/src/extension.js` agora usa o suporte a ETag da API REST do Firebase — envia o header `X-Firebase-ETag: true` para receber um `ETag` na resposta, e nas leituras seguintes manda `If-None-Match: {etag}`. Quando o conteúdo não mudou, o Firebase responde `304 Not Modified` **sem corpo** (confirmado via curl: 0 bytes vs ~173 bytes numa resposta normal pequena — a economia cresce com o tamanho do código transmitido). Como a maioria dos polls acontece sem mudança real, isso derruba o consumo de banda em bem mais de 90% no caso comum.
+- `etagFirebaseAtual` e `ultimoCorpoFirebase` guardam o último ETag e corpo conhecidos; resetados em `finalizarConexaoFirebase` a cada nova conexão (pra não reaproveitar ETag de uma sala anterior).
+- Em caso de `304`, `buscarEstadoFirebase` retorna o corpo em cache — o restante da lógica em `buscarEstado()` não precisou mudar, já que compara `timestamp` normalmente.
+- Testado via curl direto contra `quadro-digital-dds`: `304` confirmado sem mudança, `200` com ETag novo após um PUT diferente.
 
 ## Estrutura de arquivos
 
