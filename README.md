@@ -102,7 +102,9 @@ npm install
 # F5 no VSCode para abrir janela de teste
 ```
 
-## Publicar no Marketplace
+## Publicar uma nova versão no Marketplace
+
+Já publicado como [Quadro Digital — Professor](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-professor) e [Quadro Digital — Aluno](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-aluno). Para lançar uma atualização, suba a versão no `package.json` de cada extensão e publique:
 
 ```bash
 npm install -g @vscode/vsce

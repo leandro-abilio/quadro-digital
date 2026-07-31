@@ -4,6 +4,7 @@
   "description": "Transmita seu código ao vivo para os alunos no VSCode deles",
   "version": "2.4.0",
   "publisher": "leandro-abilio",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
