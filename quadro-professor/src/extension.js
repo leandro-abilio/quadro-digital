@@ -7,67 +7,64 @@ const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// ── ngrok ──
-let urlNgrok = null;
+// ── Firebase Realtime Database (relay) ──
+// Alternativa que funciona em qualquer rede que libere HTTPS (porta 443) —
+// não depende de porta de túnel dedicada (ex: 7844, bloqueada pelo Fortinet da escola).
+// Projeto compartilhado embutido para quem escolher "Salas Públicas" sem configurar nada.
+const SALAS_PUBLICAS_URL = 'https://quadro-digital-dds-default-rtdb.firebaseio.com';
+const INTERVALO_HEARTBEAT_PUBLICO = 5000;
+const VALIDADE_SALA_PUBLICA = 15000; // ms sem heartbeat até a sala sumir da lista (ver quadro-aluno)
 
-// Lê a URL do túnel via API local do ngrok (http://127.0.0.1:4040/api/tunnels)
-// O professor deve rodar "ngrok http 3456" manualmente antes de iniciar
-function lerUrlNgrok() {
+function firebaseRequest(url, method, corpo) {
   return new Promise((resolve, reject) => {
-    const req = http.get('http://127.0.0.1:4040/api/tunnels', { timeout: 3000 }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const tunnels = json.tunnels || [];
-          // Procura o túnel HTTPS que aponta para a porta 3456
-          const tunnel = tunnels.find(t =>
-            t.proto === 'https' &&
-            (t.config?.addr?.includes('3456') || t.public_url?.startsWith('https'))
-          ) || tunnels.find(t => t.proto === 'https');
-
-          if (tunnel) {
-            resolve(tunnel.public_url);
-          } else {
-            reject(new Error('Nenhum túnel HTTPS encontrado'));
-          }
-        } catch (e) {
-          reject(new Error('Erro ao ler API do ngrok: ' + e.message));
-        }
-      });
+    const dados = corpo !== undefined ? JSON.stringify(corpo) : undefined;
+    const opcoes = {
+      method,
+      headers: dados ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(dados) } : {},
+      timeout: 5000,
+    };
+    const req = https.request(url, opcoes, (res) => {
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => resolve({ status: res.statusCode, body }));
     });
-    req.on('error', () => reject(new Error('ngrok não está rodando. Execute: ngrok http 3456')));
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout ao conectar no ngrok')); });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout ao conectar no Firebase')); });
+    if (dados) req.write(dados);
+    req.end();
   });
 }
 
-async function iniciarNgrok(context, porta) {
-  try {
-    urlNgrok = await lerUrlNgrok();
-    return urlNgrok;
-  } catch (err) {
-    throw new Error(err.message);
-  }
+// Testa dentro de /salas/{sala}, não na raiz — as regras recomendadas bloqueiam
+// a raiz de propósito e só liberam leitura/escrita dentro de /salas/* e /salas_publicas/*.
+async function testarFirebase(baseUrl, sala) {
+  const r = await firebaseRequest(`${baseUrl}/salas/${encodeURIComponent(sala)}.json`, 'GET');
+  if (r.status !== 200) throw new Error('Não foi possível acessar o Firebase (verifique a URL e as regras do Realtime Database).');
 }
 
-function pararNgrok() {
-  urlNgrok = null;
+function enviarParaFirebase(baseUrl, sala, estado) {
+  firebaseRequest(`${baseUrl}/salas/${encodeURIComponent(sala)}.json`, 'PUT', estado).catch(() => {});
 }
 
-// ── Cloudflare Tunnel ──
-// Não usamos spawn (bloqueado pela Microsoft Store). O professor roda
-// "cloudflared tunnel --url http://localhost:3456" manualmente no terminal
-// e cola aqui a URL https://xxx.trycloudflare.com exibida no stdout.
-async function iniciarCloudflare() {
-  const url = await vscode.window.showInputBox({
-    prompt: 'Cole a URL gerada pelo cloudflared (ex: https://abc-def.trycloudflare.com)',
-    placeHolder: 'https://xxx.trycloudflare.com',
-    ignoreFocusOut: true,
-    validateInput: (v) => /^https:\/\/.+/.test(v.trim()) ? null : 'Informe uma URL https:// válida',
+function limparFirebase(baseUrl, sala) {
+  return firebaseRequest(`${baseUrl}/salas/${encodeURIComponent(sala)}.json`, 'DELETE').catch(() => {});
+}
+
+// ── Listagem de salas públicas ──
+function registrarSalaPublica(baseUrl, sala, nome) {
+  return firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'PUT', {
+    nome, criadaEm: Date.now(), timestamp: Date.now(),
   });
-  if (!url) throw new Error('Nenhuma URL informada');
-  return url.trim();
+}
+
+function atualizarHeartbeatPublico(baseUrl, sala, nome) {
+  firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'PUT', {
+    nome, timestamp: Date.now(),
+  }).catch(() => {});
+}
+
+function removerSalaPublica(baseUrl, sala) {
+  return firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'DELETE').catch(() => {});
 }
 
 // ── Estado global ──
@@ -80,8 +77,17 @@ let mostrarNumeros = true;
 let estadoAtual = null;
 let estadoFreezeAtual = null; // snapshot congelado
 let painelView = null;
+let modoAtual = null; // 'local' | 'firebase'
+let firebaseUrlAtual = null;
+let salaFirebaseAtual = null;
+let salaPublicaNome = null; // nome de exibição, só quando a sala é pública
+let heartbeatPublicoTimer = null;
 const clientesAtivos = new Map();
 const TIMEOUT_CLIENTE = 5000;
+
+// Uma sessão está ativa tanto no modo com servidor local (rede local)
+// quanto no modo Firebase, que não abre nenhum servidor local.
+function sessaoAtiva() { return !!servidor || modoAtual === 'firebase'; }
 
 function registrarCliente(nome) {
   clientesAtivos.set(nome, Date.now());
@@ -129,9 +135,6 @@ function iniciarServidor(porta, senha) {
       const url = new URL(req.url, 'http://localhost');
       const senhaReq = url.searchParams.get('senha');
 
-      // Headers necessários para ngrok e CORS
-      res.setHeader('ngrok-skip-browser-warning', '1');
-
       if (url.pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, versao: '2.0.0' }));
@@ -176,6 +179,14 @@ function pararServidor() {
   });
 }
 
+// Publica o estado no painel do professor e, no modo Firebase, também no relay.
+function publicarEstado(estado) {
+  painelView?.webview.postMessage({ tipo: 'atualizacao', ...estado });
+  if (modoAtual === 'firebase' && firebaseUrlAtual && salaFirebaseAtual) {
+    enviarParaFirebase(firebaseUrlAtual, salaFirebaseAtual, estado);
+  }
+}
+
 function enviarConteudo() {
   if (modoFreeze) return; // no freeze, não atualiza
   const editor = vscode.window.activeTextEditor || ultimoEditor;
@@ -191,7 +202,7 @@ function enviarConteudo() {
     linhaDestacada,
     timestamp: Date.now(),
   };
-  painelView?.webview.postMessage({ tipo: 'atualizacao', ...estadoAtual });
+  publicarEstado(estadoAtual);
 }
 
 // ── WebviewViewProvider ──
@@ -206,7 +217,7 @@ class ProfessorViewProvider {
     webviewView.webview.onDidReceiveMessage(async (msg) => {
       switch (msg.tipo) {
         case 'pronto':
-          if (servidor) enviarConteudo();
+          if (sessaoAtiva()) enviarConteudo();
           break;
         case 'iniciar':
           await cmdIniciar(this.context);
@@ -246,7 +257,7 @@ class ProfessorViewProvider {
       }
     });
 
-    if (servidor) enviarConteudo();
+    if (sessaoAtiva()) enviarConteudo();
   }
 }
 
@@ -254,7 +265,7 @@ class ProfessorViewProvider {
 async function cmdIniciar(context) {
   if (vscode.window.activeTextEditor) ultimoEditor = vscode.window.activeTextEditor;
 
-  if (servidor) {
+  if (sessaoAtiva()) {
     vscode.window.showInformationMessage('Transmissão já está ativa!');
     return;
   }
@@ -262,25 +273,24 @@ async function cmdIniciar(context) {
   // ── Escolhe o modo de conexão ──
   const modo = await vscode.window.showQuickPick([
     {
+      label: '$(flame) Firebase (nuvem)',
+      description: 'Funciona em qualquer rede que libere HTTPS (porta 443) — inclusive com o Fortinet da escola',
+      detail: 'Use seu próprio projeto Firebase ou o compartilhado (Salas Públicas), sem configuração',
+      value: 'firebase',
+    },
+    {
       label: '$(broadcast) Rede local',
       description: 'Professor e alunos na mesma rede Wi-Fi/Ethernet',
       detail: 'Mais rápido — requer que a rede permita comunicação entre máquinas',
       value: 'local',
     },
-    {
-      label: '$(globe) ngrok (túnel)',
-      description: 'Funciona mesmo com Fortinet ou redes restritivas',
-      detail: 'Requer ngrok rodando: abra o terminal e execute "ngrok http 3456" antes de continuar',
-      value: 'ngrok',
-    },
-    {
-      label: '$(cloud) Cloudflare Tunnel',
-      description: 'Alternativa ao ngrok — geralmente não bloqueada por firewalls corporativos',
-      detail: 'Execute "cloudflared tunnel --url http://localhost:3456" no terminal e cole a URL gerada',
-      value: 'cloudflare',
-    },
   ], { placeHolder: 'Como os alunos vão se conectar?', ignoreFocusOut: true });
   if (!modo) return;
+
+  if (modo.value === 'firebase') {
+    await cmdIniciarFirebase(context);
+    return;
+  }
 
   const senha = await vscode.window.showInputBox({
     prompt: 'Senha para a sessão',
@@ -296,101 +306,171 @@ async function cmdIniciar(context) {
     return;
   }
 
+  // ── Modo rede local ──
   let enderecoConexao, linkExibido;
-
-  if (modo.value === 'ngrok') {
-    // ── Modo ngrok ──
-    painelView?.webview.postMessage({ tipo: 'carregando', msg: 'Lendo URL do ngrok...' });
-    try {
-      const url = await iniciarNgrok(context, porta);
-      // Remove https:// para o aluno digitar só o host
-      const host = url.replace('https://', '');
-      enderecoConexao = { ip: host, porta: 443, ngrok: true, url, servico: 'ngrok' };
-      linkExibido = `URL: ${url}  Senha: ${senha}`;
-    } catch (err) {
-      pararServidor();
-      vscode.window.showErrorMessage('Falha ao iniciar ngrok: ' + err.message);
-      painelView?.webview.postMessage({ tipo: 'carregando-fim' });
-      return;
-    }
-    painelView?.webview.postMessage({ tipo: 'carregando-fim' });
-  } else if (modo.value === 'cloudflare') {
-    // ── Modo Cloudflare Tunnel ──
-    vscode.window.showInformationMessage(
-      'Abra um terminal e execute: cloudflared tunnel --url http://localhost:3456'
-    );
-    try {
-      const url = await iniciarCloudflare();
-      const host = url.replace('https://', '');
-      enderecoConexao = { ip: host, porta: 443, ngrok: true, url, servico: 'cloudflare' };
-      linkExibido = `URL: ${url}  Senha: ${senha}`;
-    } catch (err) {
-      pararServidor();
-      vscode.window.showErrorMessage('Falha ao configurar Cloudflare Tunnel: ' + err.message);
-      return;
-    }
+  const ips = listarIPs();
+  let ip;
+  if (ips.length === 0) {
+    ip = 'localhost';
+  } else if (ips.length === 1) {
+    ip = ips[0].ip;
   } else {
-    // ── Modo rede local ──
-    const ips = listarIPs();
-    let ip;
-    if (ips.length === 0) {
-      ip = 'localhost';
-    } else if (ips.length === 1) {
-      ip = ips[0].ip;
-    } else {
-      const escolha = await vscode.window.showQuickPick(
-        ips.map(i => ({
-          label: i.ip,
-          description: i.nome,
-          detail: i.preferido ? '⭐ Recomendado (rede física)' : '',
-        })),
-        { placeHolder: 'Escolha o IP que os alunos vão usar para conectar', ignoreFocusOut: true }
-      );
-      if (!escolha) { pararServidor(); return; }
-      ip = escolha.label;
-    }
-    enderecoConexao = { ip, porta, ngrok: false };
-    linkExibido = `IP: ${ip}  Porta: ${porta}  Senha: ${senha}`;
+    const escolha = await vscode.window.showQuickPick(
+      ips.map(i => ({
+        label: i.ip,
+        description: i.nome,
+        detail: i.preferido ? '⭐ Recomendado (rede física)' : '',
+      })),
+      { placeHolder: 'Escolha o IP que os alunos vão usar para conectar', ignoreFocusOut: true }
+    );
+    if (!escolha) { pararServidor(); return; }
+    ip = escolha.label;
   }
+  enderecoConexao = { ip, porta };
+  linkExibido = `IP: ${ip}  Porta: ${porta}  Senha: ${senha}`;
 
   painelView?.webview.postMessage({
     tipo: 'sessao',
     ip: enderecoConexao.ip,
     porta: enderecoConexao.porta,
-    ngrok: enderecoConexao.ngrok,
-    url: enderecoConexao.url,
-    servico: enderecoConexao.servico,
     senha,
     link: linkExibido,
   });
 
   vscode.commands.executeCommand('setContext', 'quadroProfessor.ativo', true);
   enviarConteudo();
+  registrarListenersEdicao(context);
+}
 
-  // Debounce para transmissão em tempo real — espera 500ms após parar de digitar
+// ── Modo Firebase (relay via Realtime Database) ──
+async function cmdIniciarFirebase(context) {
+  // ── Escolhe entre o projeto próprio do professor ou o compartilhado (Salas Públicas) ──
+  const projeto = await vscode.window.showQuickPick([
+    {
+      label: '$(globe) Salas Públicas (compartilhado)',
+      description: 'Sem configuração — usa um projeto Firebase já embutido na extensão',
+      value: 'compartilhado',
+    },
+    {
+      label: '$(key) Meu Firebase',
+      description: 'Use seu próprio projeto Firebase (Realtime Database)',
+      value: 'proprio',
+    },
+  ], { placeHolder: 'Qual Firebase usar?', ignoreFocusOut: true });
+  if (!projeto) return;
+
+  let firebaseUrl;
+  if (projeto.value === 'compartilhado') {
+    firebaseUrl = SALAS_PUBLICAS_URL;
+  } else {
+    firebaseUrl = context.globalState.get('quadroProfessor.firebaseUrl', '');
+    firebaseUrl = await vscode.window.showInputBox({
+      prompt: 'URL do Realtime Database (ex: https://meu-projeto-default-rtdb.firebaseio.com)',
+      value: firebaseUrl,
+      ignoreFocusOut: true,
+      validateInput: (v) => /^https:\/\/[^ ]+\.(firebaseio\.com|firebasedatabase\.app)\/?$/.test(v.trim())
+        ? null : 'Informe a URL do Realtime Database (termina em .firebaseio.com ou .firebasedatabase.app)',
+    });
+    if (!firebaseUrl) return;
+    firebaseUrl = firebaseUrl.trim().replace(/\/$/, '');
+    await context.globalState.update('quadroProfessor.firebaseUrl', firebaseUrl);
+  }
+
+  // ── Pública (aparece na lista de Salas Públicas) ou privada (sala/senha) ──
+  const visibilidade = await vscode.window.showQuickPick([
+    {
+      label: '$(lock) Privada',
+      description: 'Só entra quem tiver a sala/senha — não aparece em nenhuma lista',
+      value: 'privada',
+    },
+    {
+      label: '$(broadcast) Pública',
+      description: 'Aparece com um nome na lista de "Salas Públicas" para qualquer aluno',
+      value: 'publica',
+    },
+  ], { placeHolder: 'Essa sala é pública ou privada?', ignoreFocusOut: true });
+  if (!visibilidade) return;
+
+  let nomePublico = null;
+  if (visibilidade.value === 'publica') {
+    nomePublico = await vscode.window.showInputBox({
+      prompt: 'Nome de exibição da sala (ex: "Turma 9 - Matemática")',
+      ignoreFocusOut: true,
+      validateInput: (v) => v.trim() ? null : 'Informe um nome para a sala',
+    });
+    if (!nomePublico) return;
+    nomePublico = nomePublico.trim();
+  }
+
+  const sala = gerarSenha();
+
+  painelView?.webview.postMessage({ tipo: 'carregando', msg: 'Testando conexão com o Firebase...' });
+  try {
+    await testarFirebase(firebaseUrl, sala);
+  } catch (err) {
+    painelView?.webview.postMessage({ tipo: 'carregando-fim' });
+    vscode.window.showErrorMessage('Falha ao acessar Firebase: ' + err.message);
+    return;
+  }
+  painelView?.webview.postMessage({ tipo: 'carregando-fim' });
+
+  modoAtual = 'firebase';
+  firebaseUrlAtual = firebaseUrl;
+  salaFirebaseAtual = sala;
+  salaPublicaNome = nomePublico;
+
+  if (nomePublico) {
+    await registrarSalaPublica(firebaseUrl, sala, nomePublico);
+    heartbeatPublicoTimer = setInterval(
+      () => atualizarHeartbeatPublico(firebaseUrl, sala, nomePublico),
+      INTERVALO_HEARTBEAT_PUBLICO
+    );
+  }
+
+  painelView?.webview.postMessage({
+    tipo: 'sessao',
+    ip: firebaseUrl,
+    porta: null,
+    servico: 'firebase',
+    url: firebaseUrl,
+    senha: sala,
+    publica: !!nomePublico,
+    nomePublico,
+    link: nomePublico
+      ? `Sala pública: ${nomePublico}`
+      : `Firebase: ${firebaseUrl}  Sala/Senha: ${sala}`,
+  });
+
+  vscode.commands.executeCommand('setContext', 'quadroProfessor.ativo', true);
+  enviarConteudo();
+  registrarListenersEdicao(context);
+}
+
+// Debounce + listeners de edição do editor — compartilhado entre todos os modos.
+function registrarListenersEdicao(context) {
   let debounceTimer = null;
   const enviarComDebounce = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => { if (servidor) enviarConteudo(); }, 500);
+    debounceTimer = setTimeout(() => { if (sessaoAtiva()) enviarConteudo(); }, 500);
   };
 
-  const onSave   = vscode.workspace.onDidSaveTextDocument(() => { if (servidor) enviarConteudo(); });
+  const onSave   = vscode.workspace.onDidSaveTextDocument(() => { if (sessaoAtiva()) enviarConteudo(); });
   const onDigitar = vscode.workspace.onDidChangeTextDocument((e) => {
     // Ignora mudanças em documentos que não são de código (ex: output, terminal)
     if (e.document.uri.scheme !== 'file') return;
     // Atualiza ultimoEditor se o documento alterado bater com algum editor aberto
     const editorDoDoc = vscode.window.visibleTextEditors.find(ed => ed.document === e.document);
     if (editorDoDoc) ultimoEditor = editorDoDoc;
-    if (servidor) enviarComDebounce();
+    if (sessaoAtiva()) enviarComDebounce();
   });
   const onTrocar = vscode.window.onDidChangeActiveTextEditor((ed) => {
     if (ed) ultimoEditor = ed;
     linhaDestacada = null;
-    if (servidor) enviarConteudo();
+    if (sessaoAtiva()) enviarConteudo();
   });
   const onCursor = vscode.window.onDidChangeTextEditorSelection((e) => {
     if (e.textEditor) ultimoEditor = e.textEditor;
-    if (!servidor || modoApagao || modoFreeze) return;
+    if (!sessaoAtiva() || modoApagao || modoFreeze) return;
     const linha = e.selections[0].active.line;
     if (linha !== linhaDestacada) {
       linhaDestacada = linha;
@@ -404,7 +484,15 @@ async function cmdIniciar(context) {
 
 async function cmdEncerrar() {
   await pararServidor();
-  pararNgrok();
+  if (heartbeatPublicoTimer) { clearInterval(heartbeatPublicoTimer); heartbeatPublicoTimer = null; }
+  if (modoAtual === 'firebase' && firebaseUrlAtual && salaFirebaseAtual) {
+    await limparFirebase(firebaseUrlAtual, salaFirebaseAtual);
+    if (salaPublicaNome) await removerSalaPublica(firebaseUrlAtual, salaFirebaseAtual);
+  }
+  modoAtual = null;
+  firebaseUrlAtual = null;
+  salaFirebaseAtual = null;
+  salaPublicaNome = null;
   modoApagao = false;
   modoFreeze = false;
   mostrarNumeros = true;
@@ -418,7 +506,7 @@ async function cmdEncerrar() {
 
 function transmitirTrecho() {
   const editor = vscode.window.activeTextEditor || ultimoEditor;
-  if (!editor || !servidor) return;
+  if (!editor || !sessaoAtiva()) return;
   const sel = editor.selection;
   const conteudo = sel.isEmpty ? editor.document.getText() : editor.document.getText(sel);
   const nome = editor.document.fileName.split(/[\\/]/).pop();
@@ -430,7 +518,7 @@ function transmitirTrecho() {
   };
   estadoAtual = novoEstado;
   if (modoFreeze) estadoFreezeAtual = { ...novoEstado };
-  painelView?.webview.postMessage({ tipo: 'atualizacao', ...novoEstado });
+  publicarEstado(novoEstado);
 }
 
 // ── Página web para alunos acessarem pelo navegador ──
@@ -661,7 +749,6 @@ function iniciarPolling() {
 async function buscarEstado() {
   try {
     const res = await fetch('/estado?senha=' + encodeURIComponent(senhaAtual), {
-      headers: { 'ngrok-skip-browser-warning': '1' },
       cache: 'no-store',
     });
 
@@ -979,7 +1066,7 @@ body {
   <button class="btn-primario" onclick="enviar('iniciar')">▶ Iniciar transmissão</button>
 </div>
 
-<!-- Tela carregando (ngrok) -->
+<!-- Tela carregando (Firebase) -->
 <div id="tela-carregando" style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center">
   <div style="width:28px;height:28px;border:2px solid var(--vscode-panel-border);border-top-color:var(--vscode-focusBorder);border-radius:50%;animation:spin 0.8s linear infinite"></div>
   <p id="txt-carregando" style="font-size:12px;color:var(--vscode-descriptionForeground)">Iniciando...</p>
@@ -1004,7 +1091,7 @@ body {
     <div class="info-row">
       <span class="info-label">Endereço</span>
       <span class="info-valor" id="val-ip">—</span>
-      <span id="badge-ngrok" style="display:none;font-size:10px;padding:2px 6px;border-radius:3px;background:#1a6334;color:#3fb68b;white-space:nowrap">🌐 ngrok</span>
+      <span id="badge-servico" style="display:none;font-size:10px;padding:2px 6px;border-radius:3px;background:#1a6334;color:#3fb68b;white-space:nowrap"></span>
     </div>
     <button class="btn" style="width:100%;justify-content:center" onclick="copiarLink()">
       📋 Copiar dados para o chat
@@ -1140,7 +1227,11 @@ function highlight(codigo, lang) {
 function enviar(tipo) { vscodeApi.postMessage({ tipo }); }
 
 function copiarLink() {
-  const texto = '📺 Quadro Digital\\nIP: ' + dadosSessao.ip + ':' + dadosSessao.porta + '\\nSenha: ' + dadosSessao.senha;
+  const texto = dadosSessao.servico === 'firebase'
+    ? (dadosSessao.publica
+        ? '📺 Quadro Digital\\nSala pública: ' + dadosSessao.nomePublico + '\\n(procure por ela em "Salas Públicas" na extensão do aluno)'
+        : '📺 Quadro Digital\\nFirebase: ' + dadosSessao.ip + '\\nSala/Senha: ' + dadosSessao.senha)
+    : '📺 Quadro Digital\\nIP: ' + dadosSessao.ip + ':' + dadosSessao.porta + '\\nSenha: ' + dadosSessao.senha;
   vscodeApi.postMessage({ tipo: 'copiar-link', link: texto });
 }
 
@@ -1162,15 +1253,15 @@ window.addEventListener('message', (e) => {
       document.getElementById('tela-carregando').style.display = 'none';
       document.getElementById('tela-sessao').style.display = 'flex';
       document.getElementById('val-senha').textContent = msg.senha;
-      // Exibe URL ngrok ou IP:porta
-      const endLabel = msg.ngrok
-        ? msg.url
+      // Exibe URL do Firebase ou IP:porta
+      const endLabel = msg.servico === 'firebase'
+        ? (msg.url || msg.ip)
         : msg.ip + ':' + msg.porta;
       document.getElementById('val-ip').textContent = endLabel;
-      // Badge do túnel (ngrok / Cloudflare)
-      const badge = document.getElementById('badge-ngrok');
-      if (msg.ngrok) {
-        badge.textContent = msg.servico === 'cloudflare' ? '🌐 cloudflare' : '🌐 ngrok';
+      // Badge do serviço (Firebase)
+      const badge = document.getElementById('badge-servico');
+      if (msg.servico === 'firebase') {
+        badge.textContent = msg.publica ? ('🔥 pública: ' + msg.nomePublico) : '🔥 firebase (privada)';
         badge.style.display = '';
       } else {
         badge.style.display = 'none';

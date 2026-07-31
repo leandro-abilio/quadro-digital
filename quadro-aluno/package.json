@@ -2,7 +2,7 @@
   "name": "quadro-aluno",
   "displayName": "Quadro Digital — Aluno",
   "description": "Veja o código do professor em tempo real no seu VSCode",
-  "version": "2.1.2",
+  "version": "2.3.0",
   "publisher": "leandro-abilio",
   "engines": {
     "vscode": "^1.85.0"

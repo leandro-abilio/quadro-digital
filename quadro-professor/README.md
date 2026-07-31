@@ -7,28 +7,28 @@ Transmita seu código ao vivo para os alunos diretamente no VSCode deles ou pelo
 1. Clique no ícone 📺 na barra lateral esquerda do VSCode
 2. Clique em **▶ Iniciar transmissão**
 3. Escolha o modo de conexão:
-   - **Rede local** — para redes sem restrições
-   - **ngrok** — para redes com Fortinet ou outras restrições
-4. Defina uma senha para a sessão
+   - **Firebase (nuvem)** — funciona em qualquer rede que libere HTTPS, inclusive com Fortinet ou outras restrições
+   - **Rede local** — para redes sem restrições, sem depender de internet
+4. Defina uma senha (ou nome, se a sala for pública) para a sessão
 5. Clique em **📋 Copiar dados para o chat** e cole para os alunos
+
+## Modo Firebase (nuvem)
+
+Funciona mesmo com Fortinet ou redes que bloqueiam comunicação entre máquinas — usa HTTPS puro (porta 443), sem depender de túnel dedicado.
+
+**Duas formas de usar:**
+- **Salas Públicas** — sem nenhuma configuração, usa um projeto Firebase já embutido na extensão
+- **Meu Firebase** — use seu próprio projeto Firebase (Realtime Database) gratuito
+
+**Pública ou privada:**
+- **Privada** — só entra quem tiver a sala/senha (como no modo rede local)
+- **Pública** — dá um nome pra sala (ex: "Turma 9 - Matemática") e ela aparece numa lista para os alunos escolherem, sem precisar digitar nada
 
 ## Modo rede local
 
 Alunos instalam a extensão **Quadro Digital — Aluno** e conectam digitando o IP e senha.
 
 Requisito: porta 3456 liberada entre professor e alunos na rede.
-
-## Modo ngrok
-
-Funciona mesmo com Fortinet ou redes que bloqueiam comunicação entre máquinas.
-
-**Antes de iniciar:**
-1. Instale o ngrok (disponível na Microsoft Store)
-2. Configure o authtoken: `ngrok config add-authtoken SEU_TOKEN`
-3. Abra o terminal e rode: `ngrok http 3456`
-4. Deixe o terminal aberto e inicie a transmissão pelo painel
-
-Os alunos recebem uma URL e abrem no **navegador** — sem instalar nada.
 
 ## Controles do painel
 

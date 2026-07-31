@@ -14,8 +14,8 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ## Versões atuais
 
-- quadro-professor: **2.2.1**
-- quadro-aluno: **2.1.2**
+- quadro-professor: **2.4.0** (bump feito, aguardando publicação — última publicada no Marketplace é 2.3.0)
+- quadro-aluno: **2.3.0** (bump feito, aguardando publicação — última publicada no Marketplace é 2.2.0)
 
 ## Arquitetura técnica
 
@@ -28,9 +28,9 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ### Aluno (quadro-aluno)
 - Extensão VSCode com `WebviewViewProvider` — painel lateral nativo
-- Polling via `http.get` do Node.js (não via fetch no Webview — bloqueado pelo VSCode)
+- Polling via `http.get`/`https.get` do Node.js (não via fetch no Webview — bloqueado pelo VSCode)
 - Reconexão automática indefinida
-- Suporte a rede local (HTTP) e ngrok (HTTPS)
+- Suporte a rede local (HTTP) e Firebase (HTTPS, próprio ou Salas Públicas)
 
 ### Página web (modo navegador)
 - Servida em `/` pelo servidor do professor
@@ -41,7 +41,7 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 ## Funcionalidades implementadas
 
 ### Professor
-- ▶ Iniciar transmissão (escolhe modo: rede local ou ngrok/cloudflare)
+- ▶ Iniciar transmissão (escolhe modo: Firebase — nuvem, ou rede local; ngrok e Cloudflare Tunnel removidos, ver "Limpeza" abaixo)
 - 👁 Apagão — oculta código dos alunos
 - 🧊 Freeze — congela tela dos alunos, professor troca de arquivo à vontade
 - ✂️ Trecho — transmite só linhas selecionadas (Ctrl+Shift+Q)
@@ -53,7 +53,7 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 - Copiar dados da sessão para o chat
 
 ### Aluno (extensão)
-- Conectar por rede local (IP) ou ngrok (URL)
+- Conectar por Firebase (Salas Públicas ou sala/senha manual) ou rede local (IP + senha)
 - A− / A+ para fonte local
 - Reconexão automática (dot laranja ao reconectar)
 - Destaque da linha do professor
@@ -71,8 +71,9 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 # Rede local
 code --command quadroAluno.conectarDireto --args "[\"192.168.1.42\",\"senha\"]"
 
-# ngrok
-code --command quadroAluno.conectarDireto --args "[\"abc.ngrok-free.dev\",\"senha\",\"ngrok\"]"
+# Firebase (URL do Realtime Database + sala) — só funciona com sala/senha conhecida
+# de antemão, não automatiza a escolha de uma sala pública por nome
+code --command quadroAluno.conectarDireto --args "[\"https://meu-projeto-default-rtdb.firebaseio.com\",\"gato-casa-azul\",\"firebase\"]"
 ```
 
 ## Situação da rede na escola
@@ -81,44 +82,82 @@ code --command quadroAluno.conectarDireto --args "[\"abc.ngrok-free.dev\",\"senh
 - Professor: `10.110.4.45`
 - Fortinet com isolamento de cliente — bloqueia:
   - Comunicação direta entre máquinas (porta 3456)
-  - HTTPS externo no Node.js (ngrok via extensão do aluno)
-  - HTTPS externo no navegador (ngrok via browser também bloqueado)
-- Ticket aberto com TI — prazo de resposta ~6 meses
-- **Cloudflare Tunnel testado — NÃO foi bloqueado pelo Fortinet** ← próximo a explorar
+  - HTTPS externo no Node.js fora da porta 443 padrão (ex: túneis dedicados como ngrok/Cloudflare Tunnel)
+  - HTTPS externo no navegador nas mesmas condições
+- Ticket aberto com TI — prazo de resposta ~6 meses (dispensável agora, ver abaixo)
+- **RESOLVIDO (2026-07-31): modo Firebase publicado e testado em campo na escola — funcionou.** HTTPS puro na porta 443 passa pelo Fortinet normalmente. **Este é o modo recomendado para a rede da escola.**
+- ngrok e Cloudflare Tunnel foram tentados antes do Firebase e **não funcionaram** (dependem de portas/protocolos de túnel dedicados fora do HTTPS padrão — 7844 no caso do Cloudflare) — código de ambos removido do projeto (ver "Limpeza" abaixo).
 
-## Cloudflare Tunnel (implementado, parcial)
+## Limpeza do projeto (2026-07-31)
 
-O Cloudflare Tunnel (`cloudflared`) é uma alternativa ao ngrok que:
-- Não requer abertura de portas
-- Usa HTTPS via infraestrutura do Cloudflare (raramente bloqueada)
-- Tem plano gratuito
-- Pode ser configurado com domínio próprio
+- Removidos os modos **Cloudflare Tunnel** e **ngrok** do `quadro-professor` e `quadro-aluno` (`iniciarCloudflare`, `iniciarNgrok`/`lerUrlNgrok`, itens do QuickPick, badges, `modoNgrok`) — nenhum dos dois funciona na rede da escola, e o Firebase os substitui com vantagem (zero configuração externa via Salas Públicas).
+- Mantidos: rede local e Firebase (recomendado para redes restritivas).
+- Menu de escolha de modo reordenado nas duas extensões: **Firebase primeiro**, rede local depois (Firebase é o caminho recomendado agora).
+- `.vscode/launch.json` criado em `quadro-professor/` e `quadro-aluno/` (não existia) — necessário para o F5 abrir o Extension Development Host direto, sem pedir para escolher um debugger.
 
-Implementado em `quadro-professor/src/extension.js` (`iniciarCloudflare`):
-1. Professor roda `cloudflared tunnel --url http://localhost:3456` no terminal manualmente (sem `spawn`, mesma limitação do ngrok)
-2. Como o quick tunnel do `cloudflared` não expõe uma API local documentada (diferente do `http://127.0.0.1:4040` do ngrok), a extensão pede que o professor **cole** a URL `https://xxx.trycloudflare.com` exibida no stdout
-3. Badge no painel mostra "🌐 cloudflare" em vez de "🌐 ngrok"
-4. Ainda não testado em campo (rede da escola) — próximo passo é validar se esse fluxo passa pelo Fortinet como esperado
+## Modo Firebase (relay) — com lobby de Salas Públicas
 
-### Outras alternativas ao bloqueio do Fortinet (avaliar se Cloudflare falhar)
-- **Tailscale / ZeroTier (rede mesh)**: cria uma rede virtual entre professor e alunos sem depender de portas locais nem do Fortinet enxergar tráfego entre máquinas — mas exige instalar um cliente em cada máquina, o que pode esbarrar em restrições de instalação de software da escola.
-- **VPS própria como relay**: extensão do professor envia o estado para um servidor externo (barato, ex.: Oracle Cloud free tier) via HTTPS de saída; alunos também buscam de lá. Só depende de HTTPS de saída ser permitido — mais controle, mas dá manutenção de infra.
-- **Serviço serverless (Cloudflare Workers/KV, Firebase, Supabase Realtime)**: parecido com a VPS, mas sem servidor para manter; grátis para esse volume de tráfego. Exigiria reescrever a camada de transporte (hoje é HTTP puro com `http`/`https` do Node).
-- **WebSocket seguro via porta 443 direto**: como o Fortinet citado bloqueia HTTPS externo do Node e do navegador, isso provavelmente cairia na mesma restrição — não é uma alternativa real aqui.
-- Nenhuma dessas é obviamente melhor que Cloudflare Tunnel; a recomendação é testar Cloudflare Tunnel primeiro (já testado como não bloqueado) e só migrar se ele parar de funcionar.
+Usa a API REST do Firebase Realtime Database como intermediário: o professor grava o estado em `/salas/{sala}.json` (PUT) e os alunos leem de lá (GET) a cada 1.5s — mesmo polling de sempre, só muda o destino. Não abre servidor local nem depende da porta 3456; é só HTTPS de saída na porta 443.
+
+### Dois modos de projeto (híbrido)
+- **Meu Firebase**: professor/aluno configuram a URL do próprio projeto (fluxo original, URL salva em `globalState`).
+- **Salas Públicas (compartilhado)**: usa um projeto Firebase já embutido na extensão (`SALAS_PUBLICAS_URL`, atualmente `https://quadro-digital-dds-default-rtdb.firebaseio.com`), sem nenhuma configuração do lado do professor ou aluno.
+
+### Pública x privada
+- **Privada** (padrão): sala não aparece em nenhuma lista — só entra quem souber a sala/senha (fluxo original, sala = segredo compartilhado).
+- **Pública**: professor dá um nome de exibição (ex: "Turma 9 - Matemática"); a sala é registrada em `/salas_publicas/{sala}` com esse nome, e o aluno pode navegar por uma lista de salas ativas em vez de digitar sala/senha. A sala ainda tem seu ID aleatório por trás, mas ele fica visível/irrelevante já que qualquer aluno pode entrar.
+- Uma sala pública "viva" manda heartbeat a cada 5s (`INTERVALO_HEARTBEAT_PUBLICO`) atualizando o campo `timestamp` em `/salas_publicas/{sala}`. O aluno, ao listar, filtra e só mostra salas com heartbeat dos últimos 15s (`VALIDADE_SALA_PUBLICA`) — assim uma sessão encerrada abruptamente (crash, sem passar pelo `cmdEncerrar`) some da lista sozinha em poucos segundos, sem precisar de limpeza manual.
+- Ao encerrar normalmente, o professor também dá DELETE em `/salas_publicas/{sala}` (`removerSalaPublica`), além do DELETE de sempre em `/salas/{sala}`.
+
+### Regras de segurança do Realtime Database (atualizar em qualquer projeto usado, próprio ou compartilhado)
+```json
+{
+  "rules": {
+    "salas": {
+      "$sala": { ".read": true, ".write": true }
+    },
+    "salas_publicas": {
+      ".read": true,
+      "$sala": { ".write": true }
+    }
+  }
+}
+```
+Diferença importante: `salas` só permite ler *uma* sala por vez (quem não sabe o nome não entra — é o segredo). `salas_publicas` tem `.read: true` no nó inteiro, porque o aluno precisa listar *todas* as salas públicas de uma vez para montar o lobby.
+
+### Fluxo do professor (`cmdIniciarFirebase` em `quadro-professor/src/extension.js`)
+1. QuickPick: "Salas Públicas (compartilhado)" ou "Meu Firebase" → define a URL
+2. QuickPick: "Privada" ou "Pública" → se pública, pede o nome de exibição
+3. Gera a sala (`gerarSenha()`), testa acesso (`testarFirebase`, dentro de `/salas/{sala}`, nunca na raiz — bloqueada de propósito)
+4. Se pública: `registrarSalaPublica` (PUT inicial) + inicia o heartbeat (`setInterval` chamando `atualizarHeartbeatPublico` a cada 5s, guardado em `heartbeatPublicoTimer`)
+5. `publicarEstado()` continua sendo o ponto único que também escreve em `/salas/{sala}` a cada atualização de conteúdo — não mudou
+6. Ao encerrar: `clearInterval` do heartbeat, `limparFirebase` (DELETE sala) e, se pública, `removerSalaPublica` (DELETE do lobby)
+
+### Fluxo do aluno (`cmdConectarFirebase` em `quadro-aluno/src/extension.js`)
+1. QuickPick: "Salas Públicas (compartilhado)" ou "Meu Firebase" (URL salva em `globalState`, chave própria do aluno)
+2. QuickPick: "Ver salas públicas" (lista via `listarSalasPublicas`, já filtrando por atividade) ou "Entrar com sala/senha" (fluxo manual de sempre)
+3. Em ambos os casos termina em `finalizarConexaoFirebase(url, sala)`, que faz o teste de conexão e inicia o polling — não duplica lógica entre os dois caminhos
+4. `conectarDireto` (automação Veyon) continua funcionando só no fluxo manual (sala/senha conhecidas de antemão) — não tem como automatizar a escolha de uma sala pública por nome ainda
+
+### Testado (2026-07-31)
+- Rules atualizadas no projeto `quadro-digital-dds` e validadas via curl: registro/listagem de salas públicas, filtro de sala "encerrada" (heartbeat antigo) excluída da lista, e confirmação de que as regras antigas de `/salas` não quebraram.
+- **Testado dentro do VSCode (F5) com o fluxo completo do lobby (Salas Públicas, pública/privada) e com ngrok/Cloudflare Tunnel removidos — funcionou.**
+- Versões bumpadas (2.4.0 professor / 2.3.0 aluno) e `.vsix` empacotados. **Ainda não publicado no Marketplace** — falta rodar `vsce publish` (feito manualmente pelo Leandro, que já tem o PAT).
 
 ## Estrutura de arquivos
 
 ```
 quadro-digital/
 ├── quadro-professor/
-│   ├── src/extension.js    ← ~1200 linhas — servidor + painel + página web
-│   ├── package.json        ← versão 2.2.1, publisher leandro-abilio
+│   ├── src/extension.js    ← servidor + painel + página web + relay Firebase
+│   ├── .vscode/launch.json ← config de debug (F5) da extensão
+│   ├── package.json        ← publisher leandro-abilio
 │   ├── icon.png
 │   └── README.md
 ├── quadro-aluno/
-│   ├── src/extension.js    ← ~550 linhas — polling + painel
-│   ├── package.json        ← versão 2.1.2, publisher leandro-abilio
+│   ├── src/extension.js    ← polling + painel + relay Firebase
+│   ├── .vscode/launch.json ← config de debug (F5) da extensão
+│   ├── package.json        ← publisher leandro-abilio
 │   ├── icon.png
 │   └── README.md
 ├── .gitignore
@@ -152,12 +191,3 @@ O Webview do VSCode bloqueia `fetch` para endereços locais por CSP. A solução
 
 ### Highlight sem CDN
 O Webview bloqueia CDNs externos. Implementamos highlight em JS puro com regex, injetado via `JSON.stringify` do Node.js. Suporta: Python, JavaScript, TypeScript.
-
-### ngrok na extensão do professor
-Não usamos `spawn` — a Microsoft Store bloqueia execução por outros processos. Professor roda `ngrok http 3456` manualmente. Extensão lê a URL via API local: `http://127.0.0.1:4040/api/tunnels`.
-
-### Cloudflare Tunnel (a implementar)
-- Executável: `cloudflared`
-- Comando: `cloudflared tunnel --url http://localhost:3456`
-- A URL aparece no stdout: `https://xxx.trycloudflare.com`
-- Mesma abordagem do ngrok — professor roda manualmente, extensão lê a URL

@@ -2,16 +2,16 @@
 
 Veja o código do professor em tempo real no seu VSCode.
 
-> **Nota:** Se sua escola usa Fortinet ou redes restritas, use o **navegador** em vez desta extensão — o professor vai compartilhar uma URL para você abrir diretamente.
+> **Nota:** Se sua escola usa Fortinet ou redes restritas, use o modo **Firebase (nuvem)** — funciona por HTTPS puro, sem precisar de nenhuma configuração de rede.
 
 ## Como usar
 
 1. Clique no ícone 👁 na barra lateral esquerda do VSCode
 2. Clique em **🔌 Conectar ao professor**
 3. Escolha o modo:
+   - **Firebase (nuvem)** — navegue pela lista de "Salas Públicas" ativas, ou entre com sala/senha de uma sala privada
    - **Rede local** — digite o IP do professor
-   - **ngrok** — cole a URL ngrok (ex: `abc123.ngrok-free.dev`)
-4. Digite a senha da sessão
+4. Se for sala privada (rede local ou Firebase), digite a senha da sessão
 5. O painel abre com o código do professor em tempo real
 
 ## Funcionalidades
@@ -26,5 +26,5 @@ Veja o código do professor em tempo real no seu VSCode.
 ## Requisitos
 
 - Extensão **Quadro Digital — Professor** instalada e sessão iniciada
-- Mesma rede local que o professor (modo rede local)
-- Ou URL ngrok compartilhada pelo professor (modo ngrok)
+- Modo Firebase: nenhum requisito de rede além de HTTPS de saída liberado
+- Modo rede local: mesma rede que o professor, porta 3456 liberada

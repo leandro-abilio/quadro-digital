@@ -4,32 +4,32 @@ Extensões VSCode para transmitir código ao vivo em sala de aula.
 
 ## Extensões
 
-| Extensão | Para quem | Versão | Marketplace |
-|---|---|---|---|
-| **quadro-professor** | Professor | 2.2.0 | [Quadro Digital — Professor](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-professor) |
-| **quadro-aluno** | Alunos | 2.1.2 | [Quadro Digital — Aluno](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-aluno) |
+| Extensão | Para quem | Marketplace |
+|---|---|---|
+| **quadro-professor** | Professor | [Quadro Digital — Professor](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-professor) |
+| **quadro-aluno** | Alunos | [Quadro Digital — Aluno](https://marketplace.visualstudio.com/items?itemName=leandro-abilio.quadro-aluno) |
 
 ## Como funciona
 
 ```
 Professor edita código no VSCode
          ↓
-Servidor HTTP na porta 3456 (extensão do professor)
+Modo Firebase (nuvem)  → grava o estado no Firebase Realtime Database (HTTPS/443)
+Modo rede local        → servidor HTTP na porta 3456 (extensão do professor)
          ↓
-Modo rede local → Alunos conectam pela extensão Quadro Aluno
-Modo ngrok      → Alunos abrem no navegador (funciona com Fortinet)
+Alunos conectam pela extensão Quadro Aluno (rede local, Firebase próprio ou Salas Públicas)
 ```
 
 ## Modos de conexão
 
-### Rede local
-Professor e alunos na mesma rede sem restrições. Alunos usam a extensão **Quadro Aluno** no VSCode.
+### Firebase (nuvem) — recomendado para redes restritas (Fortinet etc.)
+Usa a API REST do Firebase Realtime Database como intermediário — puramente HTTPS na porta 443, sem depender de túnel dedicado nem de comunicação direta entre máquinas.
 
-### ngrok (Fortinet / redes restritas)
-1. Professor roda `ngrok http 3456` no terminal
-2. Inicia transmissão → escolhe **ngrok**
-3. Compartilha a URL e senha no chat
-4. Alunos abrem a URL no **navegador** — sem instalar nada
+- **Salas Públicas** — sem nenhuma configuração, usa um projeto Firebase já embutido na extensão. O professor dá um nome à sala e ela aparece numa lista para os alunos escolherem.
+- **Meu Firebase** — professor configura o próprio projeto Firebase gratuito (Realtime Database), com salas privadas (sala/senha) ou públicas dentro desse projeto.
+
+### Rede local
+Professor e alunos na mesma rede sem restrições. Alunos usam a extensão **Quadro Aluno** no VSCode, conectando por IP e senha.
 
 ## Estrutura do repositório
 
@@ -37,16 +37,19 @@ Professor e alunos na mesma rede sem restrições. Alunos usam a extensão **Qua
 quadro-digital/
 ├── quadro-professor/       ← Extensão do professor
 │   ├── src/
-│   │   └── extension.js   ← Servidor HTTP + painel lateral + página web
+│   │   └── extension.js   ← Servidor HTTP + painel lateral + página web + relay Firebase
+│   ├── .vscode/launch.json
 │   ├── package.json
 │   ├── icon.png
 │   └── README.md
-├── quadro-aluno/           ← Extensão do aluno (rede local)
+├── quadro-aluno/           ← Extensão do aluno
 │   ├── src/
-│   │   └── extension.js   ← Polling + painel lateral
+│   │   └── extension.js   ← Polling + painel lateral + relay Firebase
+│   ├── .vscode/launch.json
 │   ├── package.json
 │   ├── icon.png
 │   └── README.md
+├── CONTEXTO.md             ← Contexto técnico detalhado do projeto
 └── .gitignore
 ```
 
@@ -58,8 +61,8 @@ quadro-digital/
 - 👁 **Apagão** — oculta o código para os alunos pensarem
 - ✂️ **Trecho** — transmite só o trecho selecionado
 - ⏱ **Temporizador** — cronômetro com alerta visual
-- 🌐 **Modo ngrok** — serve página web para alunos acessarem pelo navegador
-- Escolha de IP de rede (ignora VPN/Radmin/VMware)
+- 🔥 **Modo Firebase** — Salas Públicas (lobby, sem configuração) ou projeto próprio
+- Escolha de IP de rede (ignora VPN/Radmin/VMware) no modo rede local
 - Transmissão em tempo real (debounce 500ms ao digitar)
 
 ### Aluno (extensão VSCode)
@@ -67,13 +70,7 @@ quadro-digital/
 - A− / A+ para ajustar fonte localmente
 - Destaque da linha onde o professor está
 - Syntax highlighting para Python, JavaScript e TypeScript
-
-### Aluno (navegador — modo ngrok)
-- Sem instalação — abre qualquer navegador
-- Tela de senha para autenticação
-- A− / A+ para ajustar fonte
-- Destaque de linha do professor
-- Funciona em celular, tablet ou PC
+- Navega pela lista de Salas Públicas ou entra com sala/senha manual
 
 ## Automação via Veyon
 
@@ -83,9 +80,9 @@ Para conectar todos os alunos automaticamente (rede local):
 code --command quadroAluno.conectarDireto --args "[\"192.168.1.42\",\"sua-senha\"]"
 ```
 
-Para modo ngrok:
+Para modo Firebase (sala/senha conhecida de antemão — não automatiza a escolha de uma sala pública por nome):
 ```
-code --command quadroAluno.conectarDireto --args "[\"abc123.ngrok-free.dev\",\"sua-senha\",\"ngrok\"]"
+code --command quadroAluno.conectarDireto --args "[\"https://meu-projeto-default-rtdb.firebaseio.com\",\"sua-sala\",\"firebase\"]"
 ```
 
 ## Desenvolvimento local
@@ -118,8 +115,8 @@ cd ../quadro-aluno && vsce publish
 
 | Modo | Requisito |
 |---|---|
+| Firebase (nuvem) | HTTPS de saída liberado (porta 443) — funciona mesmo com Fortinet |
 | Rede local | Porta 3456 liberada entre professor e alunos |
-| ngrok | Professor com acesso à internet • Alunos com navegador |
 
 ## Autor
 

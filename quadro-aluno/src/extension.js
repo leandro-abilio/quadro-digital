@@ -1,35 +1,33 @@
 const vscode = require('vscode');
 const http = require('http');
 
+// Projeto Firebase compartilhado embutido, usado quando o aluno escolhe "Salas Públicas"
+// em vez de configurar o próprio projeto.
+const SALAS_PUBLICAS_URL = 'https://quadro-digital-dds-default-rtdb.firebaseio.com';
+// Salas públicas sem heartbeat há mais tempo que isso são consideradas encerradas
+// e somem da lista (ver INTERVALO_HEARTBEAT_PUBLICO no quadro-professor).
+const VALIDADE_SALA_PUBLICA = 15000;
+
 let pollingTimer = null;
 let ultimoTimestamp = 0;
 let conectado = false;
 let ipAtual = '', senhaAtual = '';
-let modoNgrok = false; // true quando conectado via ngrok (HTTPS)
+let modoFirebase = false; // true quando conectado via relay Firebase (ipAtual = URL, senhaAtual = sala)
 const porta = 3456;
 let alunoView = null;
 let tentativasReconexao = 0;
+let extContext = null; // guardado em activate() para persistir a URL do Firebase próprio
 const MAX_TENTATIVAS = 999; // reconecta indefinidamente
 
+// Polling em rede local (HTTP puro)
 function httpGet(path) {
   return new Promise((resolve, reject) => {
-    // Suporta tanto HTTP (rede local) quanto HTTPS (ngrok)
-    const usarHttps = modoNgrok;
-    const modulo = usarHttps ? require('https') : require('http');
-    const urlBase = usarHttps
-      ? `https://${ipAtual}${path}`
-      : `http://${ipAtual}:${porta}${path}`;
-
+    const urlBase = `http://${ipAtual}:${porta}${path}`;
     const opcoes = {
       timeout: 5000,
-      headers: {
-        'ngrok-skip-browser-warning': '1',
-        'User-Agent': 'QuadroDigital/2.0',
-      },
-      // Aceita certificados autoassinados/ngrok em redes corporativas
-      rejectUnauthorized: false,
+      headers: { 'User-Agent': 'QuadroDigital/2.0' },
     };
-    const req = modulo.get(urlBase, opcoes, (res) => {
+    const req = http.get(urlBase, opcoes, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -43,7 +41,62 @@ function httpGet(path) {
 }
 
 function testarConexao() {
+  if (modoFirebase) return testarFirebase();
   return httpGet('/ping').then(r => r.status === 200).catch(() => false);
+}
+
+// ── Relay via Firebase Realtime Database ──
+// ipAtual guarda a URL base do Realtime Database, senhaAtual guarda a sala.
+// Testa dentro de /salas/{sala}, não na raiz — as regras recomendadas bloqueiam
+// a raiz de propósito e só liberam leitura/escrita dentro de /salas/*.
+function testarFirebase() {
+  return new Promise((resolve) => {
+    const url = `${ipAtual}/salas/${encodeURIComponent(senhaAtual)}.json`;
+    const req = require('https').get(url, { timeout: 5000 }, (res) => {
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
+function buscarEstadoFirebase() {
+  return new Promise((resolve, reject) => {
+    const url = `${ipAtual}/salas/${encodeURIComponent(senhaAtual)}.json`;
+    const req = require('https').get(url, { timeout: 5000 }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+// Lista as salas públicas ativas de um projeto Firebase (próprio ou compartilhado).
+// Considera "ativa" quem teve heartbeat nos últimos VALIDADE_SALA_PUBLICA ms.
+function listarSalasPublicas(baseUrl) {
+  return new Promise((resolve, reject) => {
+    const req = require('https').get(`${baseUrl}/salas_publicas.json`, { timeout: 5000 }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const salas = JSON.parse(data) || {};
+          const agora = Date.now();
+          const ativas = Object.entries(salas)
+            .filter(([, v]) => v && (agora - (v.timestamp || 0)) < VALIDADE_SALA_PUBLICA)
+            .map(([id, v]) => ({ id, nome: v.nome || id }));
+          resolve(ativas);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+  });
 }
 
 function pararPolling() {
@@ -59,18 +112,31 @@ function iniciarPolling() {
 
 async function buscarEstado() {
   try {
-    const r = await httpGet(`/estado?senha=${encodeURIComponent(senhaAtual)}&nome=Aluno`);
+    const r = modoFirebase
+      ? await buscarEstadoFirebase()
+      : await httpGet(`/estado?senha=${encodeURIComponent(senhaAtual)}&nome=Aluno`);
 
-    if (r.status === 401) {
+    if (!modoFirebase && r.status === 401) {
       pararPolling();
       alunoView?.webview.postMessage({ tipo: 'erro', msg: 'Senha incorreta.' });
       vscode.commands.executeCommand('setContext', 'quadroAluno.conectado', false);
       return;
     }
 
-    if (r.status !== 200) throw new Error('status ' + r.status);
+    if (!modoFirebase && r.status !== 200) throw new Error('status ' + r.status);
 
     const dados = r.body;
+    // No Firebase, a sala pode ainda não ter recebido nenhum conteúdo publicado.
+    // Isso não é erro de conexão — só ainda não há o que mostrar.
+    if (dados == null) {
+      if (!conectado) {
+        conectado = true;
+        tentativasReconexao = 0;
+        alunoView?.webview.postMessage({ tipo: 'conectado' });
+        vscode.commands.executeCommand('setContext', 'quadroAluno.conectado', true);
+      }
+      return;
+    }
 
     if (!conectado) {
       conectado = true;
@@ -124,28 +190,128 @@ class AlunoViewProvider {
   }
 }
 
+// Conclui a conexão Firebase depois que já se sabe a URL e a sala.
+async function finalizarConexaoFirebase(url, sala) {
+  modoFirebase = true;
+  ipAtual = url.trim().replace(/\/$/, '');
+  senhaAtual = sala.trim();
+  ultimoTimestamp = 0;
+  conectado = false;
+
+  alunoView?.webview.postMessage({ tipo: 'tentando', ip: ipAtual });
+
+  const ok = await testarConexao();
+  if (!ok) {
+    alunoView?.webview.postMessage({
+      tipo: 'erro',
+      msg: 'Não foi possível acessar o Firebase em ' + ipAtual + '.\nVerifique a URL e as regras do Realtime Database.',
+    });
+    return;
+  }
+
+  iniciarPolling();
+}
+
+async function cmdConectarFirebase() {
+  // ── Escolhe entre o projeto próprio ou o compartilhado (Salas Públicas) ──
+  const projeto = await vscode.window.showQuickPick([
+    {
+      label: '$(globe) Salas Públicas (compartilhado)',
+      description: 'Sem configuração — navega pelas salas públicas ativas',
+      value: 'compartilhado',
+    },
+    {
+      label: '$(key) Meu Firebase',
+      description: 'Use a URL de um projeto Firebase configurado pelo professor',
+      value: 'proprio',
+    },
+  ], { placeHolder: 'Qual Firebase usar?', ignoreFocusOut: true });
+  if (!projeto) return;
+
+  let firebaseUrl;
+  if (projeto.value === 'compartilhado') {
+    firebaseUrl = SALAS_PUBLICAS_URL;
+  } else {
+    let urlSalva = extContext?.globalState.get('quadroAluno.firebaseUrl', '') ?? '';
+    const url = await vscode.window.showInputBox({
+      prompt: 'URL do Firebase (ex: https://meu-projeto-default-rtdb.firebaseio.com)',
+      value: urlSalva,
+      ignoreFocusOut: true,
+    });
+    if (!url) return;
+    firebaseUrl = url.trim().replace(/\/$/, '');
+    await extContext?.globalState.update('quadroAluno.firebaseUrl', firebaseUrl);
+  }
+
+  // ── Navegar pelas salas públicas ou entrar direto com sala/senha ──
+  const entrada = await vscode.window.showQuickPick([
+    {
+      label: '$(list-unordered) Ver salas públicas',
+      description: 'Mostra as salas públicas ativas nesse Firebase',
+      value: 'listar',
+    },
+    {
+      label: '$(lock) Entrar com sala/senha',
+      description: 'Para salas privadas — pede a sala/senha informada pelo professor',
+      value: 'manual',
+    },
+  ], { placeHolder: 'Como entrar?', ignoreFocusOut: true });
+  if (!entrada) return;
+
+  if (entrada.value === 'manual') {
+    const sala = await vscode.window.showInputBox({
+      prompt: 'Sala/Senha informada pelo professor',
+      ignoreFocusOut: true,
+    });
+    if (!sala) return;
+    await finalizarConexaoFirebase(firebaseUrl, sala);
+    return;
+  }
+
+  // ── Lista as salas públicas ativas ──
+  let salas;
+  try {
+    salas = await listarSalasPublicas(firebaseUrl);
+  } catch (err) {
+    vscode.window.showErrorMessage('Não foi possível listar as salas públicas: ' + err.message);
+    return;
+  }
+  if (salas.length === 0) {
+    vscode.window.showInformationMessage('Nenhuma sala pública ativa no momento.');
+    return;
+  }
+  const escolha = await vscode.window.showQuickPick(
+    salas.map(s => ({ label: '$(broadcast) ' + s.nome, value: s.id })),
+    { placeHolder: 'Escolha uma sala pública', ignoreFocusOut: true }
+  );
+  if (!escolha) return;
+
+  await finalizarConexaoFirebase(firebaseUrl, escolha.value);
+}
+
 async function cmdConectar() {
   // Pergunta o modo de conexão
   const modo = await vscode.window.showQuickPick([
+    {
+      label: '$(flame) Firebase (nuvem)',
+      description: 'Navegue pelas Salas Públicas ou entre com sala/senha de uma sala privada',
+      value: 'firebase',
+    },
     {
       label: '$(broadcast) Rede local',
       description: 'Digite o IP do professor',
       value: 'local',
     },
-    {
-      label: '$(globe) ngrok',
-      description: 'Cole a URL ngrok do professor (ex: abc123.ngrok.io)',
-      value: 'ngrok',
-    },
   ], { placeHolder: 'Como o professor está transmitindo?', ignoreFocusOut: true });
   if (!modo) return;
 
-  const prompt = modo.value === 'ngrok'
-    ? 'URL ngrok do professor (ex: abc123.ngrok.io)'
-    : 'IP do professor (ex: 192.168.1.42)';
+  if (modo.value === 'firebase') {
+    await cmdConectarFirebase();
+    return;
+  }
 
   const endereco = await vscode.window.showInputBox({
-    prompt,
+    prompt: 'IP do professor (ex: 192.168.1.42)',
     ignoreFocusOut: true,
   });
   if (!endereco) return;
@@ -156,8 +322,7 @@ async function cmdConectar() {
   });
   if (!senha) return;
 
-  modoNgrok = modo.value === 'ngrok';
-  // Remove https:// se o aluno colou a URL completa
+  modoFirebase = false;
   ipAtual = endereco.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   senhaAtual = senha.trim();
   ultimoTimestamp = 0;
@@ -181,21 +346,25 @@ function cmdDesconectar() {
   pararPolling();
   conectado = false;
   ultimoTimestamp = 0;
+  modoFirebase = false;
   alunoView?.webview.postMessage({ tipo: 'desconectado-manual' });
   vscode.commands.executeCommand('setContext', 'quadroAluno.conectado', false);
 }
 
 // ── Conexão silenciosa para automação via Veyon ──
 // Uso no Veyon: code --command quadroAluno.conectarDireto --args "[\"IP\",\"SENHA\"]"
-// Aceita terceiro argumento opcional: 'ngrok' para modo tunnel
+// Aceita terceiro argumento opcional: 'firebase' (nesse caso "IP" é a URL do Firebase e "SENHA" é a sala)
 async function cmdConectarDireto(ip, senha, modo) {
   if (!ip || !senha) {
     vscode.window.showErrorMessage('Quadro Aluno: IP e senha são obrigatórios para conexão direta.');
     return;
   }
 
-  modoNgrok = String(modo || '').toLowerCase() === 'ngrok';
-  ipAtual = String(ip).trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  modoFirebase = String(modo || '').toLowerCase() === 'firebase';
+  // No modo Firebase o endereço é uma URL completa (precisa manter o https://)
+  ipAtual = modoFirebase
+    ? String(ip).trim().replace(/\/$/, '')
+    : String(ip).trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   senhaAtual = String(senha).trim();
   ultimoTimestamp = 0;
   conectado = false;
@@ -221,6 +390,7 @@ async function cmdConectarDireto(ip, senha, modo) {
 }
 
 function activate(context) {
+  extContext = context;
   const provider = new AlunoViewProvider();
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('quadroAluno.painel', provider, {

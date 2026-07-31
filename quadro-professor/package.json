@@ -2,7 +2,7 @@
   "name": "quadro-professor",
   "displayName": "Quadro Digital — Professor",
   "description": "Transmita seu código ao vivo para os alunos no VSCode deles",
-  "version": "2.2.0",
+  "version": "2.4.0",
   "publisher": "leandro-abilio",
   "engines": {
     "vscode": "^1.85.0"
