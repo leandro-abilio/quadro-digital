@@ -451,7 +451,7 @@ function registrarListenersEdicao(context) {
   let debounceTimer = null;
   const enviarComDebounce = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => { if (sessaoAtiva()) enviarConteudo(); }, 500);
+    debounceTimer = setTimeout(() => { if (sessaoAtiva()) enviarConteudo(); }, 1500);
   };
 
   const onSave   = vscode.workspace.onDidSaveTextDocument(() => { if (sessaoAtiva()) enviarConteudo(); });

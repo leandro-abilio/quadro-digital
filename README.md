@@ -63,7 +63,7 @@ quadro-digital/
 - ⏱ **Temporizador** — cronômetro com alerta visual
 - 🔥 **Modo Firebase** — Salas Públicas (lobby, sem configuração) ou projeto próprio
 - Escolha de IP de rede (ignora VPN/Radmin/VMware) no modo rede local
-- Transmissão em tempo real (debounce 500ms ao digitar)
+- Transmissão em tempo real (debounce 1.5s ao digitar)
 
 ### Aluno (extensão VSCode)
 - 📡 Reconexão automática se a rede cair

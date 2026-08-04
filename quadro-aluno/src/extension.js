@@ -61,7 +61,7 @@ function testarFirebase() {
 }
 
 // ETag da última leitura — usado para pedir "só me avise se mudou" (304 Not Modified)
-// em vez de baixar o estado inteiro a cada poll de 1.5s. Isso é importante porque o
+// em vez de baixar o estado inteiro a cada poll de 2.5s. Isso é importante porque o
 // plano gratuito do Firebase tem cota de download (Spark: ~360MB/dia) e, sem isso,
 // uma turma de 30 alunos numa aula de 50min já consumiria ~150-200MB sozinha.
 let etagFirebaseAtual = null;
@@ -129,7 +129,7 @@ function iniciarPolling() {
   pararPolling();
   tentativasReconexao = 0;
   buscarEstado();
-  pollingTimer = setInterval(buscarEstado, 1500);
+  pollingTimer = setInterval(buscarEstado, 2500);
 }
 
 async function buscarEstado() {

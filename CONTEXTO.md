@@ -14,8 +14,8 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ## Versões atuais
 
-- quadro-professor: **2.4.0** — publicada no Marketplace
-- quadro-aluno: **2.3.1** — 2.3.0 já publicada (sem a otimização de ETag); 2.3.1 adiciona ETag/304 no polling para não estourar a cota de download do Firebase, ainda não publicada
+- quadro-professor: **2.4.1** — debounce de publicação 500ms→1.5s (economia de banda), ainda não publicada
+- quadro-aluno: **2.3.2** — poll 1.5s→2.5s (economia de banda), ainda não publicada
 
 ## Arquitetura técnica
 
@@ -151,6 +151,11 @@ O plano Spark (gratuito) do Realtime Database libera ~10GB/mês de download (~36
 - `etagFirebaseAtual` e `ultimoCorpoFirebase` guardam o último ETag e corpo conhecidos; resetados em `finalizarConexaoFirebase` a cada nova conexão (pra não reaproveitar ETag de uma sala anterior).
 - Em caso de `304`, `buscarEstadoFirebase` retorna o corpo em cache — o restante da lógica em `buscarEstado()` não precisou mudar, já que compara `timestamp` normalmente.
 - Testado via curl direto contra `quadro-digital-dds`: `304` confirmado sem mudança, `200` com ETag novo após um PUT diferente.
+
+### Teste em campo (2026-08-04) e ajuste de debounce/poll
+Testado com alunos reais na escola — funcionou, mas consumiu **260MB em meia aula**, mesmo já com o ETag (2.3.1) publicado. Causa: o estado inclui `timestamp: Date.now()` a cada publicação, então o corpo nunca é byte-idêntico entre uma escrita e outra — o ETag só rende 304 nas pausas do professor. Como a escrita tinha debounce de só 500ms e o poll do aluno era de 1.5s, em trechos de digitação contínua a maioria dos polls caía em cima de um estado novo (200 completo), não em 304.
+
+**Ajuste feito**: aumentado o debounce de publicação do professor de 500ms para **1.5s** (`registrarListenersEdicao` em `quadro-professor/src/extension.js`) e o intervalo de poll do aluno de 1.5s para **2.5s** (`quadro-aluno/src/extension.js`). Menos escritas durante digitação contínua = mais chance de os polls baterem no mesmo ETag; menos polls no total = menos requisições mesmo nos casos de 200. Troca: leve aumento na latência percebida pelo aluno (pouco perceptível numa aula). Ainda não testado em campo com os novos valores — validar na próxima aula e, se ainda precisar de mais economia, considerar não republicar quando só a seleção/cursor muda sem digitação real (hoje já não republica, só atualiza local) ou aumentar ainda mais o poll.
 
 ## Estrutura de arquivos
 
