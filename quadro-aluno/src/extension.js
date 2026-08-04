@@ -6,7 +6,7 @@ const http = require('http');
 const SALAS_PUBLICAS_URL = 'https://quadro-digital-dds-default-rtdb.firebaseio.com';
 // Salas públicas sem heartbeat há mais tempo que isso são consideradas encerradas
 // e somem da lista (ver INTERVALO_HEARTBEAT_PUBLICO no quadro-professor).
-const VALIDADE_SALA_PUBLICA = 15000;
+const VALIDADE_SALA_PUBLICA = 20000;
 
 let pollingTimer = null;
 let ultimoTimestamp = 0;
@@ -66,6 +66,37 @@ function testarFirebase() {
 // uma turma de 30 alunos numa aula de 50min já consumiria ~150-200MB sozinha.
 let etagFirebaseAtual = null;
 let ultimoCorpoFirebase = null;
+
+// ── Presença (contagem de conectados no painel do professor) ──
+// Cada aluno escreve seu próprio heartbeat em /presencas/{sala}/{id} — caminho separado
+// de /salas/{sala} de propósito, já que o professor faz PUT do estado inteiro ali e
+// isso apagaria qualquer coisa escrita pelos alunos no mesmo nó.
+let idPresencaFirebase = null;
+
+function escreverPresencaFirebase() {
+  if (!modoFirebase || !idPresencaFirebase) return;
+  const url = `${ipAtual}/presencas/${encodeURIComponent(senhaAtual)}/${idPresencaFirebase}.json`;
+  const dados = JSON.stringify({ timestamp: { '.sv': 'timestamp' } });
+  const req = require('https').request(url, {
+    method: 'PUT',
+    timeout: 5000,
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(dados) },
+  }, (res) => res.resume());
+  req.on('error', () => {});
+  req.on('timeout', () => req.destroy());
+  req.write(dados);
+  req.end();
+}
+
+function removerPresencaFirebase() {
+  if (!idPresencaFirebase) return;
+  const url = `${ipAtual}/presencas/${encodeURIComponent(senhaAtual)}/${idPresencaFirebase}.json`;
+  const req = require('https').request(url, { method: 'DELETE', timeout: 5000 }, (res) => res.resume());
+  req.on('error', () => {});
+  req.on('timeout', () => req.destroy());
+  req.end();
+  idPresencaFirebase = null;
+}
 
 function buscarEstadoFirebase() {
   return new Promise((resolve, reject) => {
@@ -134,6 +165,7 @@ function iniciarPolling() {
 
 async function buscarEstado() {
   try {
+    if (modoFirebase) escreverPresencaFirebase(); // fire-and-forget, não atrasa o poll do estado
     const r = modoFirebase
       ? await buscarEstadoFirebase()
       : await httpGet(`/estado?senha=${encodeURIComponent(senhaAtual)}&nome=Aluno`);
@@ -221,6 +253,7 @@ async function finalizarConexaoFirebase(url, sala) {
   conectado = false;
   etagFirebaseAtual = null;
   ultimoCorpoFirebase = null;
+  idPresencaFirebase = require('crypto').randomBytes(6).toString('hex');
 
   alunoView?.webview.postMessage({ tipo: 'tentando', ip: ipAtual });
 
@@ -301,7 +334,22 @@ async function cmdConectarFirebase() {
     return;
   }
   if (salas.length === 0) {
-    vscode.window.showInformationMessage('Nenhuma sala pública ativa no momento.');
+    // Não deixa o aluno num beco sem saída: pode ser que a sala exista mas seja
+    // privada, ou que o relógio deste PC esteja errado — oferece entrar manualmente.
+    const opcao = await vscode.window.showWarningMessage(
+      'Nenhuma sala pública ativa no momento. Se o professor já iniciou a transmissão, ' +
+      'confira se a sala é privada (peça a sala/senha) ou se o relógio deste computador está certo.',
+      'Entrar com sala/senha', 'Tentar de novo'
+    );
+    if (opcao === 'Entrar com sala/senha') {
+      const sala = await vscode.window.showInputBox({
+        prompt: 'Sala/Senha informada pelo professor',
+        ignoreFocusOut: true,
+      });
+      if (sala) await finalizarConexaoFirebase(firebaseUrl, sala);
+    } else if (opcao === 'Tentar de novo') {
+      await cmdConectarFirebase();
+    }
     return;
   }
   const escolha = await vscode.window.showQuickPick(
@@ -368,6 +416,7 @@ async function cmdConectar() {
 
 function cmdDesconectar() {
   pararPolling();
+  if (modoFirebase) removerPresencaFirebase();
   conectado = false;
   ultimoTimestamp = 0;
   modoFirebase = false;
@@ -427,7 +476,7 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'quadroAluno.conectado', false);
 }
 
-function deactivate() { pararPolling(); }
+function deactivate() { pararPolling(); if (modoFirebase) removerPresencaFirebase(); }
 module.exports = { activate, deactivate };
 
 function getTokens() {
@@ -526,7 +575,8 @@ body {
   transition:background 0.15s;
 }
 .btn:hover { background:var(--vscode-toolbar-hoverBackground); border-color:var(--vscode-panel-border); }
-.btn.desconectar:hover { background:var(--vscode-inputValidation-errorBackground,#3e1010); border-color:#f44; }
+.btn.desconectar { color:#f44; border-color:rgba(244,68,68,0.4); }
+.btn.desconectar:hover { background:var(--vscode-inputValidation-errorBackground,#3e1010); border-color:#f44; color:#ff6b6b; }
 #label-fonte-aluno {
   font-size:11px; color:var(--vscode-descriptionForeground);
   min-width:28px; text-align:center;

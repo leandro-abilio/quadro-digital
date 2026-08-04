@@ -14,8 +14,8 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ## Versões atuais
 
-- quadro-professor: **2.4.1** — debounce de publicação 500ms→1.5s (economia de banda), ainda não publicada
-- quadro-aluno: **2.3.2** — poll 1.5s→2.5s (economia de banda), ainda não publicada
+- quadro-professor: **2.4.2** — debounce 500ms→1.5s, timestamp de sala pública via relógio do servidor, contagem de presença no modo Firebase, botão "Encerrar" com contraste corrigido — ainda não publicada
+- quadro-aluno: **2.3.3** — poll 1.5s→2.5s, tolerância de sala pública 15s→20s, fallback de "nenhuma sala" com entrada manual, heartbeat de presença, botão "Sair" com contraste corrigido — ainda não publicada
 
 ## Arquitetura técnica
 
@@ -106,8 +106,9 @@ Usa a API REST do Firebase Realtime Database como intermediário: o professor gr
 ### Pública x privada
 - **Privada** (padrão): sala não aparece em nenhuma lista — só entra quem souber a sala/senha (fluxo original, sala = segredo compartilhado).
 - **Pública**: professor dá um nome de exibição (ex: "Turma 9 - Matemática"); a sala é registrada em `/salas_publicas/{sala}` com esse nome, e o aluno pode navegar por uma lista de salas ativas em vez de digitar sala/senha. A sala ainda tem seu ID aleatório por trás, mas ele fica visível/irrelevante já que qualquer aluno pode entrar.
-- Uma sala pública "viva" manda heartbeat a cada 5s (`INTERVALO_HEARTBEAT_PUBLICO`) atualizando o campo `timestamp` em `/salas_publicas/{sala}`. O aluno, ao listar, filtra e só mostra salas com heartbeat dos últimos 15s (`VALIDADE_SALA_PUBLICA`) — assim uma sessão encerrada abruptamente (crash, sem passar pelo `cmdEncerrar`) some da lista sozinha em poucos segundos, sem precisar de limpeza manual.
+- Uma sala pública "viva" manda heartbeat a cada 5s (`INTERVALO_HEARTBEAT_PUBLICO`) atualizando o campo `timestamp` em `/salas_publicas/{sala}`. O aluno, ao listar, filtra e só mostra salas com heartbeat dos últimos 20s (`VALIDADE_SALA_PUBLICA`) — assim uma sessão encerrada abruptamente (crash, sem passar pelo `cmdEncerrar`) some da lista sozinha em poucos segundos, sem precisar de limpeza manual.
 - Ao encerrar normalmente, o professor também dá DELETE em `/salas_publicas/{sala}` (`removerSalaPublica`), além do DELETE de sempre em `/salas/{sala}`.
+- **Timestamp do heartbeat usa o relógio do servidor Firebase** (`{".sv": "timestamp"}`), não `Date.now()` do professor — ver "Bug: aluno não via a sala pública" abaixo.
 
 ### Regras de segurança do Realtime Database (atualizar em qualquer projeto usado, próprio ou compartilhado)
 ```json
@@ -119,11 +120,19 @@ Usa a API REST do Firebase Realtime Database como intermediário: o professor gr
     "salas_publicas": {
       ".read": true,
       "$sala": { ".write": true }
+    },
+    "presencas": {
+      "$sala": {
+        ".read": true,
+        "$id": { ".write": true }
+      }
     }
   }
 }
 ```
-Diferença importante: `salas` só permite ler *uma* sala por vez (quem não sabe o nome não entra — é o segredo). `salas_publicas` tem `.read: true` no nó inteiro, porque o aluno precisa listar *todas* as salas públicas de uma vez para montar o lobby.
+Diferença importante: `salas` só permite ler *uma* sala por vez (quem não sabe o nome não entra — é o segredo). `salas_publicas` tem `.read: true` no nó inteiro, porque o aluno precisa listar *todas* as salas públicas de uma vez para montar o lobby. `presencas` é parecido: `.read: true` em `$sala` pro professor conseguir contar todos os alunos de uma vez, mas o `.write` só é liberado por `$id` — cada aluno só escreve o próprio heartbeat, nunca o nó inteiro.
+
+**Ação pendente do usuário**: atualizar as rules no console do Firebase (projeto `quadro-digital-dds` e qualquer "Meu Firebase" em uso) para incluir o bloco `presencas` acima — sem isso a contagem de alunos conectados no modo Firebase não funciona (as escritas falham silenciosamente).
 
 ### Fluxo do professor (`cmdIniciarFirebase` em `quadro-professor/src/extension.js`)
 1. QuickPick: "Salas Públicas (compartilhado)" ou "Meu Firebase" → define a URL
@@ -156,6 +165,28 @@ O plano Spark (gratuito) do Realtime Database libera ~10GB/mês de download (~36
 Testado com alunos reais na escola — funcionou, mas consumiu **260MB em meia aula**, mesmo já com o ETag (2.3.1) publicado. Causa: o estado inclui `timestamp: Date.now()` a cada publicação, então o corpo nunca é byte-idêntico entre uma escrita e outra — o ETag só rende 304 nas pausas do professor. Como a escrita tinha debounce de só 500ms e o poll do aluno era de 1.5s, em trechos de digitação contínua a maioria dos polls caía em cima de um estado novo (200 completo), não em 304.
 
 **Ajuste feito**: aumentado o debounce de publicação do professor de 500ms para **1.5s** (`registrarListenersEdicao` em `quadro-professor/src/extension.js`) e o intervalo de poll do aluno de 1.5s para **2.5s** (`quadro-aluno/src/extension.js`). Menos escritas durante digitação contínua = mais chance de os polls baterem no mesmo ETag; menos polls no total = menos requisições mesmo nos casos de 200. Troca: leve aumento na latência percebida pelo aluno (pouco perceptível numa aula). Ainda não testado em campo com os novos valores — validar na próxima aula e, se ainda precisar de mais economia, considerar não republicar quando só a seleção/cursor muda sem digitação real (hoje já não republica, só atualiza local) ou aumentar ainda mais o poll.
+
+### Bug: aluno não via a sala pública ("nenhuma sala ativa") (2026-08-04)
+Um aluno relatou não conseguir conectar — a extensão mostrava "Nenhuma sala pública ativa no momento" mesmo com o professor transmitindo. Só esse aluno teve o problema (não a turma toda), o que aponta para o relógio do **PC do aluno** e não do professor — comum em laboratórios de escola (CMOS/bateria fraca, sem NTP).
+
+Causa: `listarSalasPublicas` (aluno) filtra salas comparando `Date.now()` do próprio PC do aluno com o campo `timestamp` gravado pelo professor com `Date.now()` do PC *dele*. Se qualquer um dos dois relógios estiver errado por mais que a janela de tolerância, a sala parece "morta" mesmo com heartbeat em dia.
+
+**Correções aplicadas**:
+- `registrarSalaPublica`/`atualizarHeartbeatPublico` (professor) agora gravam `timestamp` usando `{ ".sv": "timestamp" }` — o **relógio do servidor do Firebase**, não mais `Date.now()` do professor. Elimina o relógio do professor como fonte do problema.
+- `VALIDADE_SALA_PUBLICA` (janela de tolerância) subiu de 15s para **20s** nos dois lados, dando uma folga extra pra pequenas diferenças de relógio.
+- O relógio do *aluno* que lista as salas ainda entra na conta (não tem como evitar sem reescrever o listener via SDK, o que a API REST não expõe) — por isso a mensagem de "nenhuma sala" agora **não termina em beco sem saída**: oferece "Entrar com sala/senha" (fallback manual, pedindo a sala/senha ao professor) e "Tentar de novo" direto na mesma caixa de diálogo (`cmdConectarFirebase` em `quadro-aluno/src/extension.js`).
+
+### Feature: contagem de alunos conectados no modo Firebase (2026-08-04)
+Antes, o contador "X aluno(s)" no painel do professor só funcionava no modo rede local (`registrarCliente`, disparado por requisições no servidor HTTP local na porta 3456) — no modo Firebase os alunos nunca batem nesse servidor, então o contador ficava travado em 0.
+
+**Implementado**: presença via um caminho novo e separado, `/presencas/{sala}/{id}` — não pode ser dentro de `/salas/{sala}` porque o professor faz **PUT do estado inteiro** ali a cada atualização, o que apagaria qualquer coisa que os alunos escrevessem no mesmo nó.
+- **Aluno** (`quadro-aluno/src/extension.js`): gera um `idPresencaFirebase` aleatório ao conectar (`finalizarConexaoFirebase`) e escreve um heartbeat (`escreverPresencaFirebase`, fire-and-forget, usa `{".sv":"timestamp"}`) a cada poll (2.5s). Remove o próprio nó (`removerPresencaFirebase`, DELETE) ao desconectar manualmente ou ao desativar a extensão.
+- **Professor** (`quadro-professor/src/extension.js`): `iniciarContagemPresenca` roda a cada 5s (`INTERVALO_PRESENCA_FIREBASE`) enquanto a sala Firebase estiver ativa, lê `/presencas/{sala}.json`, conta quem teve heartbeat nos últimos 12s (`VALIDADE_PRESENCA_FIREBASE`) e reaproveita o mesmo `clientesAtivos`/`atualizarConexoes()` que já alimenta o badge "X aluno(s)" no modo rede local — não precisou mexer na UI.
+- **Exige atualizar as rules do Firebase** (bloco `presencas` na seção acima) — sem isso as escritas de presença falham silenciosamente e a contagem continua em 0.
+- Ainda não testado em campo — validar na próxima aula.
+
+### Fix: botões de "Encerrar"/"Desconectar" muito apagados
+`.btn.perigo` (professor, botão ⏹ Encerrar) e `.btn.desconectar` (aluno, botão ⏏ Sair) só tinham estilo definido no `:hover` — em repouso ficavam idênticos a um botão comum, sem indicar que é uma ação destrutiva. Adicionado `color:#f44` e `border-color` sutil em repouso nos dois, mantendo o destaque mais forte no hover.
 
 ## Estrutura de arquivos
 

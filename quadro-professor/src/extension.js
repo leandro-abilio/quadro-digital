@@ -13,7 +13,7 @@ const fs = require('fs');
 // Projeto compartilhado embutido para quem escolher "Salas Públicas" sem configurar nada.
 const SALAS_PUBLICAS_URL = 'https://quadro-digital-dds-default-rtdb.firebaseio.com';
 const INTERVALO_HEARTBEAT_PUBLICO = 5000;
-const VALIDADE_SALA_PUBLICA = 15000; // ms sem heartbeat até a sala sumir da lista (ver quadro-aluno)
+const VALIDADE_SALA_PUBLICA = 20000; // ms sem heartbeat até a sala sumir da lista (ver quadro-aluno)
 
 function firebaseRequest(url, method, corpo) {
   return new Promise((resolve, reject) => {
@@ -51,20 +51,55 @@ function limparFirebase(baseUrl, sala) {
 }
 
 // ── Listagem de salas públicas ──
+// Usa o timestamp do servidor do Firebase ({".sv": "timestamp"}), não o relógio local —
+// evita que uma sala pública "suma" da lista do aluno por o PC do professor estar com
+// a hora errada (comum em laboratórios de escola).
 function registrarSalaPublica(baseUrl, sala, nome) {
   return firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'PUT', {
-    nome, criadaEm: Date.now(), timestamp: Date.now(),
+    nome, criadaEm: { '.sv': 'timestamp' }, timestamp: { '.sv': 'timestamp' },
   });
 }
 
 function atualizarHeartbeatPublico(baseUrl, sala, nome) {
   firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'PUT', {
-    nome, timestamp: Date.now(),
+    nome, timestamp: { '.sv': 'timestamp' },
   }).catch(() => {});
 }
 
 function removerSalaPublica(baseUrl, sala) {
   return firebaseRequest(`${baseUrl}/salas_publicas/${encodeURIComponent(sala)}.json`, 'DELETE').catch(() => {});
+}
+
+// ── Contagem de alunos conectados no modo Firebase ──
+// Cada aluno escreve seu próprio heartbeat em /presencas/{sala}/{id}; aqui só lemos
+// a lista e contamos quem teve heartbeat recente. Caminho separado de /salas/{sala}
+// de propósito — o professor faz PUT do estado inteiro em /salas/{sala}, o que apagaria
+// qualquer coisa escrita ali pelos alunos.
+function lerPresencasFirebase(baseUrl, sala) {
+  return firebaseRequest(`${baseUrl}/presencas/${encodeURIComponent(sala)}.json`, 'GET');
+}
+
+function iniciarContagemPresenca(baseUrl, sala) {
+  pararContagemPresenca();
+  const checar = async () => {
+    try {
+      const r = await lerPresencasFirebase(baseUrl, sala);
+      const presencas = JSON.parse(r.body || 'null') || {};
+      const agora = Date.now();
+      const ativos = Object.values(presencas).filter(
+        (p) => p && typeof p.timestamp === 'number' && (agora - p.timestamp) < VALIDADE_PRESENCA_FIREBASE
+      ).length;
+      clientesAtivos.clear();
+      for (let i = 0; i < ativos; i++) clientesAtivos.set('firebase-' + i, agora);
+      atualizarConexoes();
+    } catch (e) { /* ignora falha isolada, tenta de novo no próximo tick */ }
+  };
+  checar();
+  presencaFirebaseTimer = setInterval(checar, INTERVALO_PRESENCA_FIREBASE);
+}
+
+function pararContagemPresenca() {
+  if (presencaFirebaseTimer) { clearInterval(presencaFirebaseTimer); presencaFirebaseTimer = null; }
 }
 
 // ── Estado global ──
@@ -82,8 +117,11 @@ let firebaseUrlAtual = null;
 let salaFirebaseAtual = null;
 let salaPublicaNome = null; // nome de exibição, só quando a sala é pública
 let heartbeatPublicoTimer = null;
+let presencaFirebaseTimer = null;
 const clientesAtivos = new Map();
 const TIMEOUT_CLIENTE = 5000;
+const INTERVALO_PRESENCA_FIREBASE = 5000; // deve bater com o intervalo de escrita do aluno
+const VALIDADE_PRESENCA_FIREBASE = 12000; // ms sem heartbeat até o aluno sumir da contagem
 
 // Uma sessão está ativa tanto no modo com servidor local (rede local)
 // quanto no modo Firebase, que não abre nenhum servidor local.
@@ -426,6 +464,7 @@ async function cmdIniciarFirebase(context) {
       INTERVALO_HEARTBEAT_PUBLICO
     );
   }
+  iniciarContagemPresenca(firebaseUrl, sala);
 
   painelView?.webview.postMessage({
     tipo: 'sessao',
@@ -485,6 +524,7 @@ function registrarListenersEdicao(context) {
 async function cmdEncerrar() {
   await pararServidor();
   if (heartbeatPublicoTimer) { clearInterval(heartbeatPublicoTimer); heartbeatPublicoTimer = null; }
+  pararContagemPresenca();
   if (modoAtual === 'firebase' && firebaseUrlAtual && salaFirebaseAtual) {
     await limparFirebase(firebaseUrlAtual, salaFirebaseAtual);
     if (salaPublicaNome) await removerSalaPublica(firebaseUrlAtual, salaFirebaseAtual);
@@ -881,7 +921,7 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'quadroProfessor.ativo', false);
 }
 
-function deactivate() { pararServidor(); }
+function deactivate() { pararServidor(); pararContagemPresenca(); if (heartbeatPublicoTimer) clearInterval(heartbeatPublicoTimer); }
 module.exports = { activate, deactivate };
 
 function getTokens() {
@@ -997,7 +1037,8 @@ body {
 .btn:hover { background:var(--vscode-toolbar-hoverBackground); border-color:var(--vscode-panel-border); }
 .btn.ativo { background:var(--vscode-button-background); color:var(--vscode-button-foreground); border-color:transparent; }
 .btn.freeze-ativo { background:#e8a838; color:#000; border-color:transparent; }
-.btn.perigo:hover { background:var(--vscode-inputValidation-errorBackground,#3e1010); border-color:#f44; }
+.btn.perigo { color:#f44; border-color:rgba(244,68,68,0.4); }
+.btn.perigo:hover { background:var(--vscode-inputValidation-errorBackground,#3e1010); border-color:#f44; color:#ff6b6b; }
 
 /* ── Info linha ── */
 .info-linha {
