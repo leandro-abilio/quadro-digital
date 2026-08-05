@@ -14,8 +14,8 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 
 ## Versões atuais
 
-- quadro-professor: **2.4.2** — debounce 500ms→1.5s, timestamp de sala pública via relógio do servidor, contagem de presença no modo Firebase, botão "Encerrar" com contraste corrigido — ainda não publicada
-- quadro-aluno: **2.3.3** — poll 1.5s→2.5s, tolerância de sala pública 15s→20s, fallback de "nenhuma sala" com entrada manual, heartbeat de presença, botão "Sair" com contraste corrigido — ainda não publicada
+- quadro-professor: **2.4.2** — publicada no Marketplace. Debounce 500ms→1.5s, timestamp de sala pública via relógio do servidor, contagem de presença no modo Firebase, botão "Encerrar" com contraste corrigido
+- quadro-aluno: **2.3.3** — publicada no Marketplace. Poll 1.5s→2.5s, tolerância de sala pública 15s→20s, fallback de "nenhuma sala" com entrada manual, heartbeat de presença, botão "Sair" com contraste corrigido
 
 ## Arquitetura técnica
 
