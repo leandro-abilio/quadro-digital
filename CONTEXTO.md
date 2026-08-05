@@ -132,7 +132,7 @@ Usa a API REST do Firebase Realtime Database como intermediário: o professor gr
 ```
 Diferença importante: `salas` só permite ler *uma* sala por vez (quem não sabe o nome não entra — é o segredo). `salas_publicas` tem `.read: true` no nó inteiro, porque o aluno precisa listar *todas* as salas públicas de uma vez para montar o lobby. `presencas` é parecido: `.read: true` em `$sala` pro professor conseguir contar todos os alunos de uma vez, mas o `.write` só é liberado por `$id` — cada aluno só escreve o próprio heartbeat, nunca o nó inteiro.
 
-**Ação pendente do usuário**: atualizar as rules no console do Firebase (projeto `quadro-digital-dds` e qualquer "Meu Firebase" em uso) para incluir o bloco `presencas` acima — sem isso a contagem de alunos conectados no modo Firebase não funciona (as escritas falham silenciosamente).
+**Rules atualizadas (2026-08-05)** no projeto `quadro-digital-dds` com o bloco `presencas` acima.
 
 ### Fluxo do professor (`cmdIniciarFirebase` em `quadro-professor/src/extension.js`)
 1. QuickPick: "Salas Públicas (compartilhado)" ou "Meu Firebase" → define a URL
