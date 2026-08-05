@@ -129,9 +129,42 @@ function buscarEstadoFirebase() {
   });
 }
 
+// Pergunta a hora real ao servidor do Firebase (PUT com {".sv":"timestamp"} — a API REST
+// devolve o valor já resolvido no corpo da resposta). Evita depender do relógio local do
+// aluno: em laboratórios de escola é comum o relógio do PC estar bem errado (bateria da
+// CMOS fraca, sem NTP), o que fazia salas ativas parecerem "mortas" para aquele aluno
+// específico mesmo com heartbeat do professor em dia.
+// Escreve em /salas/_relogio (não num nó novo) para reaproveitar a regra de escrita que
+// já existe em "salas.$sala" — não exige mexer nas rules do Firebase de novo.
+function horaServidorFirebase(baseUrl) {
+  return new Promise((resolve, reject) => {
+    const dados = JSON.stringify({ '.sv': 'timestamp' });
+    const req = require('https').request(`${baseUrl}/salas/_relogio.json`, {
+      method: 'PUT',
+      timeout: 5000,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(dados) },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        const t = Number(data);
+        if (Number.isFinite(t)) resolve(t); else reject(new Error('resposta inválida'));
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(dados);
+    req.end();
+  });
+}
+
 // Lista as salas públicas ativas de um projeto Firebase (próprio ou compartilhado).
 // Considera "ativa" quem teve heartbeat nos últimos VALIDADE_SALA_PUBLICA ms.
-function listarSalasPublicas(baseUrl) {
+async function listarSalasPublicas(baseUrl) {
+  // Usa a hora do servidor Firebase como referência; se não conseguir (rede instável),
+  // cai para o relógio local — pior que o ideal, mas não pior do que já era antes.
+  const agora = await horaServidorFirebase(baseUrl).catch(() => Date.now());
+
   return new Promise((resolve, reject) => {
     const req = require('https').get(`${baseUrl}/salas_publicas.json`, { timeout: 5000 }, (res) => {
       let data = '';
@@ -139,7 +172,6 @@ function listarSalasPublicas(baseUrl) {
       res.on('end', () => {
         try {
           const salas = JSON.parse(data) || {};
-          const agora = Date.now();
           const ativas = Object.entries(salas)
             .filter(([, v]) => v && (agora - (v.timestamp || 0)) < VALIDADE_SALA_PUBLICA)
             .map(([id, v]) => ({ id, nome: v.nome || id }));

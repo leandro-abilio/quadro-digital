@@ -15,7 +15,7 @@ Duas extensões VSCode para transmitir código ao vivo em sala de aula:
 ## Versões atuais
 
 - quadro-professor: **2.4.2** — publicada no Marketplace. Debounce 500ms→1.5s, timestamp de sala pública via relógio do servidor, contagem de presença no modo Firebase, botão "Encerrar" com contraste corrigido
-- quadro-aluno: **2.3.3** — publicada no Marketplace. Poll 1.5s→2.5s, tolerância de sala pública 15s→20s, fallback de "nenhuma sala" com entrada manual, heartbeat de presença, botão "Sair" com contraste corrigido
+- quadro-aluno: **2.3.4** — poll 1.5s→2.5s, tolerância de sala pública 15s→20s, fallback de "nenhuma sala" com entrada manual, heartbeat de presença, botão "Sair" com contraste corrigido, listagem de salas públicas usa hora do servidor Firebase em vez do relógio local — ainda não publicada
 
 ## Arquitetura técnica
 
@@ -175,6 +175,10 @@ Causa: `listarSalasPublicas` (aluno) filtra salas comparando `Date.now()` do pr�
 - `registrarSalaPublica`/`atualizarHeartbeatPublico` (professor) agora gravam `timestamp` usando `{ ".sv": "timestamp" }` — o **relógio do servidor do Firebase**, não mais `Date.now()` do professor. Elimina o relógio do professor como fonte do problema.
 - `VALIDADE_SALA_PUBLICA` (janela de tolerância) subiu de 15s para **20s** nos dois lados, dando uma folga extra pra pequenas diferenças de relógio.
 - O relógio do *aluno* que lista as salas ainda entra na conta (não tem como evitar sem reescrever o listener via SDK, o que a API REST não expõe) — por isso a mensagem de "nenhuma sala" agora **não termina em beco sem saída**: oferece "Entrar com sala/senha" (fallback manual, pedindo a sala/senha ao professor) e "Tentar de novo" direto na mesma caixa de diálogo (`cmdConectarFirebase` em `quadro-aluno/src/extension.js`).
+
+**Testado em campo (2026-08-05) e ainda não resolvido de vez**: as correções acima não bastaram — o mesmo aluno continuou sem ver a sala pública (conseguiu entrar só pelo fallback manual). Como só ele teve o problema, confirma que era o relógio do **próprio PC do aluno**, não o do professor (já corrigido) nem a janela de tolerância (já alargada).
+
+**Correção adicional**: `listarSalasPublicas` (aluno) agora busca a hora real do servidor Firebase antes de filtrar — `horaServidorFirebase()` faz um PUT com `{".sv":"timestamp"}` em `/salas/_relogio` (reaproveita a regra de escrita de `salas.$sala`, não precisou mexer nas rules de novo) e usa o valor resolvido devolvido no corpo da resposta como "agora", em vez de `Date.now()` do aluno. Isso tira o relógio do aluno da equação por completo. Se essa requisição falhar (rede instável no momento do clique), cai de volta pro `Date.now()` local — não piora o que já existia, só deixa de ser a fonte primária de erro. Adiciona uma escrita extra pequena só quando o aluno abre "Ver salas públicas" (não entra no polling contínuo, impacto de banda irrelevante). Ainda não testado em campo com essa versão.
 
 ### Feature: contagem de alunos conectados no modo Firebase (2026-08-04)
 Antes, o contador "X aluno(s)" no painel do professor só funcionava no modo rede local (`registrarCliente`, disparado por requisições no servidor HTTP local na porta 3456) — no modo Firebase os alunos nunca batem nesse servidor, então o contador ficava travado em 0.
